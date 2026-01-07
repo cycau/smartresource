@@ -1,0 +1,35 @@
+nodeId: "dbapi-1"
+nodePort: 8080
+maxHttpSessions: 1000
+weight: 1.0
+secretKey: "change-me"  #
+
+cluster:
+  - nodeId: "dbapi-1"
+    baseUrl: "https://sqlgw-1.example.com"
+  - nodeId: "dbapi-2"
+    baseUrl: "https://sqlgw-2.example.com"
+  - nodeId: "dbapi-3"
+    baseUrl: "https://sqlgw-3.example.com"
+
+datasources:
+  - datasourceId: pg_master
+    group: "crm-system"
+    driver: "postgres"
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
+    maxOpenConns: 100
+    minIdleConns: 10
+    maxTransactionConns: 5
+    connMaxLifetimeSeconds: 1800
+    defaultExecuteTimeoutSeconds: 300
+    readonly: false
+  - datasourceId: pg_slave01
+    group: "crm-system"
+    driver: "postgres"
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
+    maxOpenConns: 50
+    minIdleConns: 5
+    maxTransactionConns: 0
+    connMaxLifetimeSeconds: 1800
+    defaultExecuteTimeoutSeconds: 300
+    readonly: true
