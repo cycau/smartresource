@@ -4,16 +4,17 @@ nodes:
   - nodeId: "node-1"
     baseUrl: "https://sqlgw-1.example.com"
     datasources:
-      - dbName: "pg_master"
+      - datasourceId: "ds01"
+        databaseName: "pg_master"
         readonly: false
-      - dbName: "pg_slave01"
+      - databaseName: "pg_slave01"
         readonly: true
   - nodeId: "node-2"
     baseUrl: "https://sqlgw-2.example.com"
   - nodeId: "node-3"
     baseUrl: "https://sqlgw-3.example.com"
     datasources:
-      - dbName: "pg_master"
+      - databaseName: "pg_master"
         readonly: false
-      - dbName: "pg_slave01"
+      - databaseName: "pg_slave01"
         readonly: true
