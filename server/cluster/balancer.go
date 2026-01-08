@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,13 +9,11 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// collectClusterHealthInfo 格納用
 type Balancer struct {
 	SelfNode   *NodeInfo  `json:"selfNode"`
 	OtherNodes []NodeInfo `json:"otherNodes"`
@@ -24,6 +21,9 @@ type Balancer struct {
 	mu         sync.RWMutex
 }
 
+/*****************************
+ * インスタンス化
+ *****************************/
 func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
 	return &Balancer{
 		SelfNode:   selfNode,
@@ -33,55 +33,262 @@ func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
 	}
 }
 
-// config.cluster から各ノードの health 情報を取得
+/*****************************
+ * 各ノードの health 情報を取得
+ *****************************/
 func (c *Balancer) CollectHealth() *Balancer {
-	c.mu.Lock()
-	nodes := make([]NodeInfo, len(c.OtherNodes))
-	copy(nodes, c.OtherNodes)
-	c.mu.Unlock()
+	for i := range c.OtherNodes {
+		node := &c.OtherNodes[i]
 
-	for i := range nodes {
-		node := &nodes[i]
-		// TODO: 300ms超えたらエラーとする
-		timeout := 300 * time.Millisecond // 300ms
-		go func(timeout time.Duration, node *NodeInfo) {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		go func(node *NodeInfo) {
+			defer node.mu.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.BaseURL+"/health", nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.BaseURL+"/healz", nil)
 			if err != nil {
 				log.Printf("Failed to create request for %s: %v", node.NodeID, err)
+				node.mu.Lock()
+				node.Status = HEALZERR
 				return
 			}
 			response, err := http.DefaultClient.Do(req)
 			if err != nil {
 				log.Printf("Failed to do request for %s: %v", node.NodeID, err)
+				node.mu.Lock()
+				node.Status = HEALZERR
 				return
 			}
 			defer response.Body.Close()
 			body, err := io.ReadAll(response.Body)
 			if err != nil {
 				log.Printf("Failed to read response body for %s: %v", node.NodeID, err)
+				node.mu.Lock()
+				node.Status = HEALZERR
 				return
 			}
-			var healthInfo NodeInfo
-			err = json.Unmarshal(body, &healthInfo)
+			var nodeInfo NodeInfo
+			err = json.Unmarshal(body, &nodeInfo)
 			if err != nil {
 				log.Printf("Failed to unmarshal health info from %s: %v", node.NodeID, err)
+				node.mu.Lock()
+				node.Status = HEALZERR
 				return
 			}
-			c.mu.Lock()
-			for j := range c.OtherNodes {
-				if c.OtherNodes[j].NodeID == node.NodeID {
-					c.OtherNodes[j] = healthInfo
-					break
-				}
-			}
-			c.mu.Unlock()
-		}(timeout, node)
+
+			node.mu.Lock()
+			node.Status = nodeInfo.Status
+			node.HealthInfo = nodeInfo.HealthInfo
+		}(node)
 	}
 	return c
 }
 
+/*****************************
+ * ノード選出
+ *****************************/
+func (b *Balancer) SelectNode(next http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		// エンドポイントタイプを判定
+		path := r.URL.Path
+		var endpoint endpointType
+		if strings.HasSuffix(path, "/query") {
+			endpoint = endpointQuery
+		} else if strings.HasSuffix(path, "/execute") {
+			endpoint = endpointExecute
+		} else if strings.HasSuffix(path, "/tx/begin") {
+			endpoint = endpointBeginTx
+		} else {
+			// 対象外のパスはそのまま処理
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// RunningHttp count
+		b.SelfNode.mu.Lock()
+		b.SelfNode.HealthInfo.RunningHttp++
+		b.SelfNode.mu.Unlock()
+		defer func() {
+			b.SelfNode.mu.Lock()
+			b.SelfNode.HealthInfo.RunningHttp--
+			b.SelfNode.mu.Unlock()
+		}()
+
+		// トランザクション処理は常に受け入れる
+		txID := extractTxId(r)
+		if txID != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		selfNode := b.SelfNode.Clone()
+
+		dbName := extractDbName(r)
+		datasources := matchedDatasources(selfNode.HealthInfo.Datasources, dbName)
+
+		// 自分の余力をチェック
+		hasCapacity := judgeCapacity(&selfNode, dbName, endpoint)
+		if hasCapacity {
+			// 余力がある場合は自分で処理
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		otherNodes := make([]NodeInfo, len(b.OtherNodes))
+		for i := range b.OtherNodes {
+			otherNodes[i] = b.OtherNodes[i].Clone()
+		}
+
+		// 中央レイテンシを計算
+		medianLatency := calculateMedianLatency(otherNodes)
+
+		// スコア計算
+		scores := make([]nodeScore, 0, len(otherNodes))
+		for i := range otherNodes {
+			node := &otherNodes[i]
+			if node.Status != SERVING {
+				continue
+			}
+
+			m := calculateNormalizedMetrics(node, dbName)
+
+			// ゲート条件チェック
+			if !checkGateForEndpoint(node, m, endpoint) {
+				continue
+			}
+
+			// レイテンシ補正
+			m.latScore = adjustLatencyScore(m.latScore, node.HealthInfo.Datasources[0].LatencyP95Ms, medianLatency)
+
+			// スコア計算
+			var score float64
+			switch endpoint {
+			case endpointQuery:
+				score = calculateScoreQuery(m)
+			case endpointExecute:
+				score = calculateScoreExecute(m)
+			case endpointBeginTx:
+				score = calculateScoreBeginTx(m)
+			}
+
+			scores = append(scores, nodeScore{node: node, score: score})
+		}
+
+		// ノード選択
+		selectedNode := switchNode(scores)
+		if selectedNode == nil {
+			log.Printf("No candidate nodes available, processing locally despite lack of capacity")
+			http.Error(w, "No candidate nodes available and no capacity to process locally", http.StatusServiceUnavailable)
+			return
+		}
+
+		// リダイレクト
+		redirectURL := selectedNode.BaseURL + r.URL.Path
+		if r.URL.RawQuery != "" {
+			redirectURL += "?" + r.URL.RawQuery + "&dsId=" + b.SelfNode.NodeID
+		} else {
+			redirectURL += "?dsId=" + b.SelfNode.NodeID
+		}
+
+		// 307 Temporary Redirect
+		w.Header().Set("Location", redirectURL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}
+	return http.HandlerFunc(fn)
+}
+
+// 指定されたdatasourceGroupにマッチするDatasourceInfoを抽出
+func matchedDatasources(datasources []DatasourceInfo, dsGroup *string) []DatasourceInfo {
+	matched := make([]DatasourceInfo, 0)
+	for _, ds := range datasources {
+		if ds.DatasourceGroup == *dsGroup {
+			matched = append(matched, ds)
+		}
+	}
+	return matched
+}
+
+// 自分の余力をチェック
+func judgeCapacity(node *NodeInfo, dsId *string, endpoint endpointType) bool {
+	if node.Status != "SERVING" {
+		return false
+	}
+
+	// 正規化指標を計算
+	m := calculateNormalizedMetrics(node, dsId)
+
+	if m.dbFree <= 0 {
+		return false
+	}
+
+	switch endpoint {
+	case endpointBeginTx:
+		if m.txFree < 0.05 {
+			return false
+		}
+	case endpointQuery, endpointExecute:
+		if m.errScore == 0 {
+			return false
+		}
+		if m.latScore == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ノード選択（TopK + Weighted Random）
+func switchNode(scores []nodeScore) *NodeInfo {
+	if len(scores) == 0 {
+		return nil
+	}
+
+	// TopKを抽出
+	k := TOP_K
+	if len(scores) < k {
+		k = len(scores)
+	}
+
+	// スコアでソート（降順）
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].score > scores[j].score
+	})
+
+	topK := scores[:k]
+
+	// 重み付きランダム選択
+	totalWeight := 0.0
+	for _, ns := range topK {
+		weight := ns.score
+		if ns.node.Weight > 0 {
+			weight *= ns.node.Weight
+		}
+		totalWeight += weight
+	}
+
+	if totalWeight <= 0 {
+		return topK[0].node
+	}
+
+	r := rand.Float64() * totalWeight
+	current := 0.0
+	for _, ns := range topK {
+		weight := ns.score
+		if ns.node.Weight > 0 {
+			weight *= ns.node.Weight
+		}
+		current += weight
+		if r <= current {
+			return ns.node
+		}
+	}
+
+	return topK[0].node
+}
+
+/*****************************
+ * スコア計算
+ *****************************/
 // 定数定義
 const (
 	LAT_BAD_MS = 2000.0 // 2秒を"かなり悪い"基準
@@ -115,22 +322,37 @@ type normalizedMetrics struct {
 	uptimeScore float64
 }
 
-func calculateNormalizedMetrics(h NodeInfo, maxHttpSessions, maxOpenConns, maxTransactionConns int) normalizedMetrics {
-	httpUsage := float64(h.HealthInfo.RunningHttp) / float64(maxHttpSessions)
-	dbUsage := float64(h.HealthInfo.DatasourceInfo[0].OpenConns) / float64(maxOpenConns)
-	txUsage := float64(h.HealthInfo.DatasourceInfo[0].RunningTx) / float64(maxTransactionConns)
+func calculateNormalizedMetrics(node *NodeInfo, dsId *string) normalizedMetrics {
+	node.mu.RLock()
+	defer node.mu.RUnlock()
+
+	var dsInfo DatasourceInfo
+	for _, ds := range node.HealthInfo.Datasources {
+		if dsId != nil && ds.DatasourceID == *dsId {
+			// 指定されたdatasourceIdが存在する場合、その情報を使う
+			dsInfo = ds
+			break
+		}
+	}
+	if dsId == nil {
+		return normalizedMetrics{}
+	}
+
+	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpSessions)
+	dbUsage := float64(dsInfo.OpenConns) / float64(dsInfo.MaxOpenConns)
+	txUsage := float64(dsInfo.RunningTx) / float64(dsInfo.MaxTxConns)
 
 	httpFree := 1 - clamp01(httpUsage)
 	dbFree := 1 - clamp01(dbUsage)
 	txFree := 1 - clamp01(txUsage)
 
 	// 品質指標の正規化
-	latScore := 1 - clamp01(log1p(float64(h.HealthInfo.DatasourceInfo[0].P95LatencyMs))/log1p(LAT_BAD_MS))
-	errScore := 1 - clamp01(h.HealthInfo.DatasourceInfo[0].ErrorRate1m/ERR_BAD)
-	toScore := 1 - clamp01(float64(h.HealthInfo.DatasourceInfo[0].Timeouts1m)/TO_BAD)
-	waitScore := 1 - clamp01(float64(h.HealthInfo.DatasourceInfo[0].WaitConns)/WAIT_BAD)
-	idleScore := clamp01(float64(h.HealthInfo.DatasourceInfo[0].IdleConns) / float64(maxOpenConns))
-	uptimeScore := clamp01(float64(h.HealthInfo.UptimeSec) / UPTIME_OK)
+	latScore := 1 - clamp01(log1p(float64(dsInfo.LatencyP95Ms))/log1p(LAT_BAD_MS))
+	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_BAD)
+	toScore := 1 - clamp01(float64(dsInfo.Timeouts1m)/TO_BAD)
+	waitScore := 1 - clamp01(float64(dsInfo.WaitConns)/WAIT_BAD)
+	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.MaxOpenConns))
+	uptimeScore := clamp01(float64(node.HealthInfo.UptimeSec) / UPTIME_OK)
 
 	return normalizedMetrics{
 		httpFree:    httpFree,
@@ -155,7 +377,7 @@ func adjustLatencyScore(latScore float64, p95LatencyMs int, medianLatency float6
 	return 1.0 / (1.0 + (latRatio-1.0)*K)
 }
 
-// スコア計算（用途別）
+// 用途別スコア計算
 func calculateScoreQuery(m normalizedMetrics) float64 {
 	return 0.22*m.dbFree +
 		0.18*m.httpFree +
@@ -190,52 +412,9 @@ func calculateScoreBeginTx(m normalizedMetrics) float64 {
 		0.02*m.idleScore
 }
 
-// ゲート条件チェック
-type endpointType int
-
-const (
-	endpointQuery endpointType = iota
-	endpointExecute
-	endpointBeginTx
-)
-
-func checkCommonGate(h NodeInfo, m normalizedMetrics) bool {
-	if h.Status != "SERVING" {
-		return false
-	}
-	if m.dbFree <= 0 {
-		return false
-	}
-	return true
-}
-
-func checkGateForEndpoint(h NodeInfo, m normalizedMetrics, endpoint endpointType) bool {
-	if !checkCommonGate(h, m) {
-		return false
-	}
-
-	switch endpoint {
-	case endpointBeginTx:
-		if m.txFree < 0.05 {
-			return false
-		}
-		if h.HealthInfo.DatasourceInfo[0].WaitConns >= 20 {
-			return false
-		}
-	case endpointQuery, endpointExecute:
-		if m.errScore == 0 {
-			return false
-		}
-		if m.latScore == 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // ノードスコア情報
 type nodeScore struct {
-	node  NodeInfo
+	node  *NodeInfo
 	score float64
 }
 
@@ -246,8 +425,8 @@ func calculateMedianLatency(nodes []NodeInfo) float64 {
 	}
 	latencies := make([]float64, 0, len(nodes))
 	for _, node := range nodes {
-		if node.HealthInfo.DatasourceInfo[0].P95LatencyMs > 0 {
-			latencies = append(latencies, float64(node.HealthInfo.DatasourceInfo[0].P95LatencyMs))
+		if node.HealthInfo.Datasources[0].LatencyP95Ms > 0 {
+			latencies = append(latencies, float64(node.HealthInfo.Datasources[0].LatencyP95Ms))
 		}
 	}
 	if len(latencies) == 0 {
@@ -261,215 +440,70 @@ func calculateMedianLatency(nodes []NodeInfo) float64 {
 	return latencies[mid]
 }
 
-// ノード選択（TopK + Weighted Random）
-func selectNode(scores []nodeScore) *NodeInfo {
-	if len(scores) == 0 {
-		return nil
+/*****************************
+ * ゲート条件チェック
+ *****************************/
+type endpointType int
+
+const (
+	endpointQuery endpointType = iota
+	endpointExecute
+	endpointBeginTx
+)
+
+func checkGateForEndpoint(node *NodeInfo, m normalizedMetrics, endpoint endpointType) bool {
+	if node.Status != "SERVING" {
+		return false
 	}
-
-	// TopKを抽出
-	k := TOP_K
-	if len(scores) < k {
-		k = len(scores)
-	}
-
-	// スコアでソート（降順）
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].score > scores[j].score
-	})
-
-	topK := scores[:k]
-
-	// 重み付きランダム選択
-	totalWeight := 0.0
-	for _, ns := range topK {
-		weight := ns.score
-		if ns.node.Weight > 0 {
-			weight *= ns.node.Weight
-		}
-		totalWeight += weight
-	}
-
-	if totalWeight <= 0 {
-		return &topK[0].node
-	}
-
-	r := rand.Float64() * totalWeight
-	current := 0.0
-	for _, ns := range topK {
-		weight := ns.score
-		if ns.node.Weight > 0 {
-			weight *= ns.node.Weight
-		}
-		current += weight
-		if r <= current {
-			return &ns.node
-		}
-	}
-
-	return &topK[0].node
-}
-
-// リクエストボディからTxIDを取得
-func extractTxIDFromRequest(r *http.Request) (*string, error) {
-	// リクエストボディを読み取る（後で再利用するため）
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	var reqBody map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &reqBody); err != nil {
-		return nil, nil // JSONパースエラーは無視（TxIDがない可能性）
-	}
-
-	if txID, ok := reqBody["txId"].(string); ok && txID != "" {
-		return &txID, nil
-	}
-	return nil, nil
-}
-
-// 自分の余力をチェック
-func (b *Balancer) hasCapacity(selfHealth *NodeInfo, endpoint endpointType) bool {
-	if selfHealth == nil {
+	if m.dbFree <= 0 {
 		return false
 	}
 
-	m := calculateNormalizedMetrics(*selfHealth, selfHealth.HealthInfo.MaxHttpSessions, selfHealth.HealthInfo.DatasourceInfo[0].MaxOpenConns, selfHealth.HealthInfo.DatasourceInfo[0].MaxTxConns)
-
-	// 簡単な余力チェック（ゲート条件を満たしているか）
-	return checkGateForEndpoint(*selfHealth, m, endpoint)
+	switch endpoint {
+	case endpointBeginTx:
+		if m.txFree < 0.05 {
+			return false
+		}
+		// if node.HealthInfo.Datasources[0].WaitConns >= 20 {
+		// 	return false
+		// }
+	case endpointQuery, endpointExecute:
+		if m.errScore == 0 {
+			return false
+		}
+		if m.latScore == 0 {
+			return false
+		}
+	}
+	return true
 }
 
-func (b *Balancer) DoOrSwitchNode(next http.Handler) http.Handler {
-	fn := func(w http.ResponseWriter, r *http.Request) {
-		// RunningHttp count
-		b.SelfNode.HealthInfo.RunningHttp++
-		defer func() {
-			b.SelfNode.HealthInfo.RunningHttp--
-		}()
-
-		// トランザクション処理は常に受け入れる
-		txID, err := extractTxIDFromRequest(r)
-		if err == nil && txID != nil && *txID != "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		rebalanceCnt, err := strconv.Atoi(r.URL.Query().Get("rebalanceCnt"))
-		if err != nil {
-			rebalanceCnt = 0
-		}
-		if rebalanceCnt >= 2 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte("Too many redirects"))
-			return
-		}
-
-		// エンドポイントタイプを判定
-		path := r.URL.Path
-		var endpoint endpointType
-		if strings.HasSuffix(path, "/query") {
-			endpoint = endpointQuery
-		} else if strings.HasSuffix(path, "/execute") {
-			endpoint = endpointExecute
-		} else if strings.HasSuffix(path, "/tx/begin") {
-			endpoint = endpointBeginTx
-		} else {
-			// 対象外のパスはそのまま処理
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// 自分のヘルス情報を取得
-		selfHealth := b.SelfNode
-
-		// 自分の余力をチェック
-		if b.hasCapacity(selfHealth, endpoint) {
-			// 余力がある場合は自分で処理
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// 余力がない場合、他のノードを評価
-		b.mu.RLock()
-		candidates := make([]NodeInfo, 0, len(b.OtherNodes))
-		for _, node := range b.OtherNodes {
-			if node.NodeID != selfHealth.NodeID && node.NodeID != "" {
-				candidates = append(candidates, node)
-			}
-		}
-		b.mu.RUnlock()
-
-		if len(candidates) == 0 {
-			// 候補がない場合は自分で処理
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// 中央レイテンシを計算
-		medianLatency := calculateMedianLatency(candidates)
-
-		// スコア計算
-		scores := make([]nodeScore, 0, len(candidates))
-		for _, node := range candidates {
-			m := calculateNormalizedMetrics(node, node.HealthInfo.MaxHttpSessions, node.HealthInfo.DatasourceInfo[0].MaxOpenConns, node.HealthInfo.DatasourceInfo[0].MaxTxConns)
-
-			// ゲート条件チェック
-			if !checkGateForEndpoint(node, m, endpoint) {
-				continue
-			}
-
-			// レイテンシ補正
-			adjustedLatScore := adjustLatencyScore(m.latScore, node.HealthInfo.DatasourceInfo[0].P95LatencyMs, medianLatency)
-			m.latScore = adjustedLatScore
-
-			// スコア計算
-			var score float64
-			switch endpoint {
-			case endpointQuery:
-				score = calculateScoreQuery(m)
-			case endpointExecute:
-				score = calculateScoreExecute(m)
-			case endpointBeginTx:
-				score = calculateScoreBeginTx(m)
-			}
-
-			scores = append(scores, nodeScore{node: node, score: score})
-		}
-
-		if len(scores) == 0 {
-			// 候補がない場合は自分で処理
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// ノード選択
-		selectedNode := selectNode(scores)
-		if selectedNode == nil {
-			// 選択できない場合は自分で処理
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// リダイレクト
-		redirectURL := selectedNode.BaseURL + r.URL.Path
-		if r.URL.RawQuery != "" {
-			redirectURL += "?" + r.URL.RawQuery
-		}
-		// rebalanceCount queryが存在したら削除
-		if rebalanceCnt > 0 {
-			queryString := "rebalanceCnt=" + strconv.Itoa(rebalanceCnt)
-			idx := strings.Index(redirectURL, queryString)
-			if idx != -1 {
-				redirectURL = redirectURL[idx-1:] + redirectURL[:idx+len(queryString)]
-			}
-		}
-		// 307 Temporary Redirect
-		redirectURL += "&rebalanceCnt=" + strconv.Itoa(rebalanceCnt+1)
-		w.Header().Set("Location", redirectURL)
-		w.WriteHeader(http.StatusTemporaryRedirect)
+/*****************************
+ * リクエスト情報抽出
+ *****************************/
+// リクエストからtxIdを取得
+func extractTxId(r *http.Request) *string {
+	query := r.URL.Query()
+	if txID := query.Get("txId"); txID != "" {
+		return &txID
 	}
-	return http.HandlerFunc(fn)
+	return nil
+}
+
+// リクエストからdatasourceIdを取得
+func extractDsId(r *http.Request) *string {
+	query := r.URL.Query()
+	if dsId := query.Get("dsId"); dsId != "" {
+		return &dsId
+	}
+	return nil
+}
+
+// リクエストからdatabaseNameを取得
+func extractDbName(r *http.Request) *string {
+	query := r.URL.Query()
+	if dbName := query.Get("dbName"); dbName != "" {
+		return &dbName
+	}
+	return nil
 }
