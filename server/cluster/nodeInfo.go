@@ -1,31 +1,36 @@
 package cluster
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type DatasourceInfo struct {
-	DatasourceID string `json:"datasourceId"`
-	Active       bool   `json:"active"`
-	Readonly     bool   `json:"readonly"`
-	MaxOpenConns int    `json:"maxOpenConns"`
-	MaxTxConns   int    `json:"maxTxConns"`
+	DatasourceID    string `json:"datasourceId"`
+	DatasourceGroup string `json:"datasourceGroup"`
+	Active          bool   `json:"active"`
+	Readonly        bool   `json:"readonly"`
+	MaxOpenConns    int    `json:"maxOpenConns"`
+	MaxTxConns      int    `json:"maxTxConns"`
 
 	OpenConns    int     `json:"openConns"`
 	IdleConns    int     `json:"idleConns"`
 	WaitConns    int     `json:"waitConns"`
 	RunningSql   int     `json:"runningSql"`
 	RunningTx    int     `json:"runningTx"`
-	P95LatencyMs int     `json:"p95LatencyMs"`
 	ErrorRate1m  float64 `json:"errorRate1m"`
 	Timeouts1m   int     `json:"timeouts1m"`
 	LatencyMs    int     `json:"latencyMs"`
+	LatencyP95Ms int     `json:"latencyP95Ms"`
+	score        float64 `json:"-"`
 }
 
 type HealthInfo struct {
 	MaxHttpSessions int              `json:"maxHttpSessions"`
 	RunningHttp     int              `json:"runningHttp"`
 	UptimeSec       int              `json:"uptimeSec"`
-	DatasourceInfo  []DatasourceInfo `json:"datasourceInfo"`
-	CheckTime       string           `json:"checkTime"`
+	Datasources     []DatasourceInfo `json:"datasources"`
+	CheckTime       time.Time        `json:"checkTime"`
 }
 
 type NodeStatus string
@@ -35,6 +40,7 @@ const (
 	SERVING  NodeStatus = "SERVING"
 	DRAINING NodeStatus = "DRAINING"
 	STOPPING NodeStatus = "STOPPING"
+	HEALZERR NodeStatus = "HEALZERR"
 )
 
 type NodeInfo struct {
@@ -44,4 +50,28 @@ type NodeInfo struct {
 	Weight     float64      `json:"weight,omitempty"` // ノードの重み
 	HealthInfo HealthInfo   `json:"healthInfo"`
 	mu         sync.RWMutex `json:"-"`
+}
+
+// 必要の場合はatomic.Pointerでラップして使うこと
+
+func (node *NodeInfo) Clone() NodeInfo {
+	node.mu.RLock()
+	defer node.mu.RUnlock()
+
+	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
+	copy(datasources, node.HealthInfo.Datasources)
+
+	return NodeInfo{
+		NodeID:  node.NodeID,
+		Status:  node.Status,
+		BaseURL: node.BaseURL,
+		Weight:  node.Weight,
+		HealthInfo: HealthInfo{
+			MaxHttpSessions: node.HealthInfo.MaxHttpSessions,
+			RunningHttp:     node.HealthInfo.RunningHttp,
+			UptimeSec:       node.HealthInfo.UptimeSec,
+			Datasources:     datasources,
+			CheckTime:       node.HealthInfo.CheckTime,
+		},
+	}
 }
