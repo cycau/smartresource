@@ -14,8 +14,8 @@ cluster:
 
 datasources:
   - datasourceId: pg_master
-    group: "crm-system"
-    driver: "postgres"
+    databaseName: crm-system
+    driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 100
     minIdleConns: 10
@@ -24,8 +24,8 @@ datasources:
     defaultExecuteTimeoutSeconds: 300
     readonly: false
   - datasourceId: pg_slave01
-    group: "crm-system"
-    driver: "postgres"
+    databaseName: crm-system
+    driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 50
     minIdleConns: 5
