@@ -10,15 +10,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
 type Balancer struct {
 	SelfNode   *NodeInfo  `json:"selfNode"`
 	OtherNodes []NodeInfo `json:"otherNodes"`
-	semaphore  chan struct{}
-	mu         sync.RWMutex
 }
 
 // 定数定義
@@ -48,8 +45,6 @@ func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
 	return &Balancer{
 		SelfNode:   selfNode,
 		OtherNodes: otherNodes,
-		semaphore:  make(chan struct{}, selfNode.HealthInfo.MaxHttpSessions),
-		mu:         sync.RWMutex{},
 	}
 }
 
@@ -126,9 +121,8 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 
 		endpoint, dbName, txId := extractRequest(r)
 
-		// エンドポイントタイプを判定
+		// 対象外のパスはそのまま処理
 		if *endpoint == EP_Other {
-			// 対象外のパスはそのまま処理
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -142,27 +136,25 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		selfNode := b.SelfNode.Clone()
 
 		// 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
-		selfDatasource, selfScore := selectDatasource(&selfNode, dbName, *endpoint)
-		if selfDatasource != nil {
-			next.ServeHTTP(w, r) // 他ノードとの協調で処理
+		recommendedDatasource, bestSelfScore := selectDatasource(&selfNode, dbName, *endpoint)
+		if recommendedDatasource != nil {
+			next.ServeHTTP(w, r)
 			return
 		}
 		// Weight抽選で、自分のScoreの方が高い場合は自分で処理
 		// それ以外はredirect、Max３回か、自分にリダイレクトされた場合は終了（Client側実装）
 
 		// 他ノードのデータソース合計数を取得
-		maxDatasourceNum := 0
+		countDatasources := 0
 		otherNodes := make([]NodeInfo, len(b.OtherNodes))
 		for i := range b.OtherNodes {
 			otherNodes[i] = b.OtherNodes[i].Clone()
-			maxDatasourceNum += len(b.OtherNodes[i].HealthInfo.Datasources)
+			countDatasources += len(b.OtherNodes[i].HealthInfo.Datasources)
 		}
 
-		// 中央レイテンシを計算
-		medianLatency := calculateMedianLatency(otherNodes, dbName)
-
+		isWrite := *endpoint == EP_Execute || *endpoint == EP_BeginTx
 		// スコア計算
-		scores := make([]scoreInfo, 0, maxDatasourceNum)
+		scores := make([]scoreInfo, 0, countDatasources)
 		for nodeIdx := range otherNodes {
 			node := &otherNodes[nodeIdx]
 			if node.Status != SERVING {
@@ -170,35 +162,33 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			}
 
 			for dsIdx := range node.HealthInfo.Datasources {
-				if node.HealthInfo.Datasources[dsIdx].Active {
+				ds := &node.HealthInfo.Datasources[dsIdx]
+				if !ds.Active {
 					continue
 				}
-				if node.HealthInfo.Datasources[dsIdx].DatabaseName != *dbName {
+				if ds.DatabaseName != *dbName {
 					continue
 				}
-				if node.HealthInfo.Datasources[dsIdx].Readonly && (*endpoint == EP_Execute || *endpoint == EP_BeginTx) {
+				if ds.Readonly && isWrite {
 					continue
 				}
 
-				m := calculateDatasourceMetrics(node, dsIdx)
+				m := calculateMetrics(node, dsIdx)
 				// ゲート条件チェック
 				if !checkGate(m, *endpoint) {
 					continue
 				}
-				// レイテンシ補正
-				m.latScore = adjustLatencyScore(m.latScore, node.HealthInfo.Datasources[dsIdx].LatencyP95Ms, medianLatency)
-
 				// スコア計算
 				score := calculateScore(m, *endpoint)
 				scores = append(scores, scoreInfo{score: score, weight: node.Weight, index: nodeIdx})
 			}
-
 		}
 
 		// ノード選択
-		_, weightedRandomNodeScore := selectBestWithWeight(scores)
-		if weightedRandomNodeScore == nil {
-			if selfScore.score > 0 {
+		_, randomNodeScore := selectBestWithWeight(scores)
+		if randomNodeScore == nil {
+			// 自分にはまだ捌ける余地がある場合は自分で処理
+			if bestSelfScore.score > 0 {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -206,19 +196,20 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			http.Error(w, "No candidate nodes available and no capacity to process locally", http.StatusServiceUnavailable)
 			return
 		}
-		if selfScore.score > weightedRandomNodeScore.score {
+		// 自分のScoreの方が高い場合は自分で処理
+		if bestSelfScore.score > randomNodeScore.score {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		selectedNode := &otherNodes[weightedRandomNodeScore.index]
+		// 他ノードにリダイレクト
+		selectedNode := &otherNodes[randomNodeScore.index]
 
-		// リダイレクト
 		redirectURL := selectedNode.BaseURL + r.URL.Path
 		if r.URL.RawQuery != "" {
-			redirectURL += "?" + r.URL.RawQuery + "&dsId=" + b.SelfNode.NodeID
+			redirectURL += "?" + r.URL.RawQuery + "&nodeId=" + b.SelfNode.NodeID
 		} else {
-			redirectURL += "?dsId=" + b.SelfNode.NodeID
+			redirectURL += "?nodeId=" + b.SelfNode.NodeID
 		}
 
 		// 307 Temporary Redirect
@@ -231,19 +222,14 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 // 80%以下なら自分で処理、それ以外は他ノードとの協調を試みる
 func selectDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOINT_TYPE) (*DatasourceInfo, *scoreInfo) {
 	if node.Status != SERVING {
-		return nil, nil
-	}
-	if float64(node.HealthInfo.RunningHttp)/float64(node.HealthInfo.MaxHttpSessions) >= USAGE_THRESHOLD {
-		return nil, nil
+		return nil, &scoreInfo{score: 0, weight: 0, index: -1}
 	}
 
-	isWrite := false
-	if endpoint == EP_Execute || endpoint == EP_BeginTx {
-		isWrite = true
-	}
+	isWrite := endpoint == EP_Execute || endpoint == EP_BeginTx
 
 	scores := make([]scoreInfo, 0, len(node.HealthInfo.Datasources))
-	for idx, ds := range node.HealthInfo.Datasources {
+	for dsIdx := range node.HealthInfo.Datasources {
+		ds := &node.HealthInfo.Datasources[dsIdx]
 		if !ds.Active {
 			continue
 		}
@@ -253,17 +239,8 @@ func selectDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOINT_TY
 		if isWrite && ds.Readonly {
 			continue
 		}
-		if endpoint != EP_BeginTx {
-			if float64(ds.OpenConns)/float64(ds.MaxOpenConns) >= USAGE_THRESHOLD {
-				continue
-			}
-		} else {
-			if float64(ds.RunningTx)/float64(ds.MaxTxConns) >= USAGE_THRESHOLD {
-				continue
-			}
-		}
 		// 正規化指標を計算
-		m := calculateDatasourceMetrics(node, idx)
+		m := calculateMetrics(node, dsIdx)
 		score := calculateScore(m, endpoint)
 		weight := 0.0
 		switch endpoint {
@@ -274,11 +251,32 @@ func selectDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOINT_TY
 		case EP_BeginTx:
 			weight = float64(ds.MaxTxConns)
 		}
-		scores = append(scores, scoreInfo{score: score, weight: weight, index: idx})
+		scores = append(scores, scoreInfo{score: score, weight: weight, index: dsIdx})
 	}
 
-	_, weightedRandomScore := selectBestWithWeight(scores)
-	return &node.HealthInfo.Datasources[weightedRandomScore.index], weightedRandomScore
+	// ノード選択（TopK + Weighted Random）
+	bestScore, weightedRandomScore := selectBestWithWeight(scores)
+	if bestScore == nil {
+		return nil, &scoreInfo{score: 0, weight: 0, index: -1}
+	}
+
+	// 使用率80%以下なら、他のノードとの協調を試みる
+	if float64(node.HealthInfo.RunningHttp)/float64(node.HealthInfo.MaxHttpSessions) >= USAGE_THRESHOLD {
+		return nil, bestScore
+	}
+
+	randomDs := &node.HealthInfo.Datasources[weightedRandomScore.index]
+	if endpoint != EP_BeginTx {
+		if float64(randomDs.OpenConns)/float64(randomDs.MaxOpenConns) >= USAGE_THRESHOLD {
+			return nil, bestScore
+		}
+	} else {
+		if float64(randomDs.RunningTx)/float64(randomDs.MaxTxConns) >= USAGE_THRESHOLD {
+			return nil, bestScore
+		}
+	}
+
+	return randomDs, weightedRandomScore
 }
 
 // ノード選択（TopK + Weighted Random）
@@ -345,7 +343,7 @@ func log1p(x float64) float64 {
 }
 
 // 正規化された指標を計算
-type datasourceMetrics struct {
+type normalizedMetrics struct {
 	httpFree    float64
 	dbFree      float64
 	txFree      float64
@@ -357,11 +355,8 @@ type datasourceMetrics struct {
 	uptimeScore float64
 }
 
-func calculateDatasourceMetrics(node *NodeInfo, dsIdx int) datasourceMetrics {
+func calculateMetrics(node *NodeInfo, dsIdx int) normalizedMetrics {
 	dsInfo := &node.HealthInfo.Datasources[dsIdx]
-	if !dsInfo.Active {
-		return datasourceMetrics{}
-	}
 
 	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpSessions)
 	dbUsage := float64(dsInfo.OpenConns) / float64(dsInfo.MaxOpenConns)
@@ -379,7 +374,7 @@ func calculateDatasourceMetrics(node *NodeInfo, dsIdx int) datasourceMetrics {
 	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.MaxOpenConns))
 	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
 
-	return datasourceMetrics{
+	return normalizedMetrics{
 		httpFree:    httpFree,
 		dbFree:      dbFree,
 		txFree:      txFree,
@@ -392,72 +387,8 @@ func calculateDatasourceMetrics(node *NodeInfo, dsIdx int) datasourceMetrics {
 	}
 }
 
-// 相対レイテンシ補正
-// latScore: 元のレイテンシスコア（0〜1の範囲）
-// p95LatencyMs: このノードのP95レイテンシ（ミリ秒）
-// medianLatency: 候補ノードの中央レイテンシ（ミリ秒）
-// 返り値: 補正後のレイテンシスコア（0〜1の範囲を保証）
-//
-// 補正ロジック:
-// - 中央値と同じレイテンシ → 補正係数1.0（変化なし）
-// - 中央値より遅い → 補正係数 < 1.0（ペナルティ）
-// - 中央値より速い → 補正係数 > 1.0（ボーナス、最大1.5倍まで）
-// - 元のlatScoreに補正係数を乗算し、0〜1の範囲にクランプ
-func adjustLatencyScore(latScore float64, p95LatencyMs int, medianLatency float64) float64 {
-	// 中央値が無効な場合は元のスコアを返す
-	if medianLatency <= 0 {
-		return latScore
-	}
-
-	// P95レイテンシが0以下の場合は元のスコアを返す（異常値の可能性）
-	if p95LatencyMs <= 0 {
-		return latScore
-	}
-
-	// 相対レイテンシ比を計算
-	latRatio := float64(p95LatencyMs) / medianLatency
-
-	// 補正係数K（1.5〜3の間、現在は2.0）
-	K := 2.0
-
-	// 相対補正係数を計算
-	// 元の式: 1.0 / (1.0 + (latRatio-1.0)*K)
-	// この式は latRatio < 0.5 の場合に分母が負になる可能性がある
-	//
-	// 安全な計算: 分母が常に正になるようにする
-	// latRatio < 0.5 の場合、1.0 + (latRatio-1.0)*K = 1.0 + (負の値)*K となり負になる可能性がある
-	// 例: latRatio=0.4, K=2.0 → 1.0 + (0.4-1.0)*2.0 = 1.0 - 1.2 = -0.2
-
-	// より安全な式: 分母を絶対値で保護し、最小値を設定
-	denominator := 1.0 + (latRatio-1.0)*K
-
-	// 分母が0以下になるのを防ぐ（異常に速いノードの場合）
-	// この場合、最大ボーナス（1.5倍）を適用
-	if denominator <= 0 {
-		adjusted := latScore * 1.5
-		return clamp01(adjusted)
-	}
-
-	// 通常の補正係数を計算
-	relativeAdjustment := 1.0 / denominator
-
-	// 補正係数の範囲を制限
-	// - 最小値: 0.1（過度なペナルティを防ぐ）
-	// - 最大値: 1.5（過度なボーナスを防ぐ）
-	if relativeAdjustment < 0.1 {
-		relativeAdjustment = 0.1
-	} else if relativeAdjustment > 1.5 {
-		relativeAdjustment = 1.5
-	}
-
-	// 元のlatScoreに相対補正を適用
-	// 結果は0〜1の範囲にクランプ
-	adjusted := latScore * relativeAdjustment
-	return clamp01(adjusted)
-}
-
 // 用途別スコア計算
-func calculateScore(m datasourceMetrics, endpoint ENDPOINT_TYPE) float64 {
+func calculateScore(m normalizedMetrics, endpoint ENDPOINT_TYPE) float64 {
 	switch endpoint {
 	case EP_Query:
 		return 0.22*m.dbFree +
@@ -498,42 +429,10 @@ type scoreInfo struct {
 	index  int
 }
 
-// 候補ノードの中央レイテンシを計算
-func calculateMedianLatency(nodes []NodeInfo, dbName *string) float64 {
-	if len(nodes) == 0 {
-		return 0
-	}
-	latencies := make([]float64, 0, len(nodes))
-	for nodeIdx := range nodes {
-		node := &nodes[nodeIdx]
-		for dsIdx := range node.HealthInfo.Datasources {
-			ds := &node.HealthInfo.Datasources[dsIdx]
-			if !ds.Active {
-				continue
-			}
-			if ds.DatabaseName != *dbName {
-				continue
-			}
-			if ds.LatencyP95Ms > 0 {
-				latencies = append(latencies, float64(ds.LatencyP95Ms))
-			}
-		}
-	}
-	if len(latencies) == 0 {
-		return 0
-	}
-	sort.Float64s(latencies)
-	mid := len(latencies) / 2
-	if len(latencies)%2 == 0 {
-		return (latencies[mid-1] + latencies[mid]) / 2.0
-	}
-	return latencies[mid]
-}
-
 /*****************************
  * ゲート条件チェック
  *****************************/
-func checkGate(m datasourceMetrics, endpoint ENDPOINT_TYPE) bool {
+func checkGate(m normalizedMetrics, endpoint ENDPOINT_TYPE) bool {
 	if m.dbFree <= 0 {
 		return false
 	}
