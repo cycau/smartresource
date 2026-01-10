@@ -6,30 +6,30 @@ import (
 )
 
 type DatasourceInfo struct {
-	DatasourceID    string `json:"datasourceId"`
-	DatasourceGroup string `json:"datasourceGroup"`
-	Active          bool   `json:"active"`
-	Readonly        bool   `json:"readonly"`
-	MaxOpenConns    int    `json:"maxOpenConns"`
-	MaxTxConns      int    `json:"maxTxConns"`
+	DatasourceID string `json:"datasourceId"`
+	DatabaseName string `json:"databaseName"`
+	Active       bool   `json:"active"`
+	Readonly     bool   `json:"readonly"`
+	MaxOpenConns int    `json:"maxOpenConns"`
+	MaxTxConns   int    `json:"maxTxConns"`
 
-	OpenConns    int     `json:"openConns"`
-	IdleConns    int     `json:"idleConns"`
-	WaitConns    int     `json:"waitConns"`
-	RunningSql   int     `json:"runningSql"`
-	RunningTx    int     `json:"runningTx"`
-	ErrorRate1m  float64 `json:"errorRate1m"`
-	Timeouts1m   int     `json:"timeouts1m"`
-	LatencyMs    int     `json:"latencyMs"`
-	LatencyP95Ms int     `json:"latencyP95Ms"`
-	score        float64 `json:"-"`
+	OpenConns    int          `json:"openConns"`
+	IdleConns    int          `json:"idleConns"`
+	WaitConns    int          `json:"waitConns"`
+	RunningSql   int          `json:"runningSql"`
+	RunningTx    int          `json:"runningTx"`
+	ErrorRate1m  float64      `json:"errorRate1m"`
+	Timeouts1m   int          `json:"timeouts1m"`
+	LatencyMs    int          `json:"latencyMs"`
+	LatencyP95Ms int          `json:"latencyP95Ms"`
+	mu           sync.RWMutex `json:"-"`
 }
 
 type HealthInfo struct {
 	MaxHttpSessions int              `json:"maxHttpSessions"`
 	RunningHttp     int              `json:"runningHttp"`
-	UptimeSec       int              `json:"uptimeSec"`
 	Datasources     []DatasourceInfo `json:"datasources"`
+	UpTime          time.Time        `json:"upTime"`
 	CheckTime       time.Time        `json:"checkTime"`
 }
 
@@ -69,7 +69,7 @@ func (node *NodeInfo) Clone() NodeInfo {
 		HealthInfo: HealthInfo{
 			MaxHttpSessions: node.HealthInfo.MaxHttpSessions,
 			RunningHttp:     node.HealthInfo.RunningHttp,
-			UptimeSec:       node.HealthInfo.UptimeSec,
+			UpTime:          node.HealthInfo.UpTime,
 			Datasources:     datasources,
 			CheckTime:       node.HealthInfo.CheckTime,
 		},
