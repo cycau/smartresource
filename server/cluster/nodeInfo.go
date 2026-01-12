@@ -22,7 +22,7 @@ type DatasourceInfo struct {
 	Timeouts1m   int          `json:"timeouts1m"`
 	LatencyMs    int          `json:"latencyMs"`
 	LatencyP95Ms int          `json:"latencyP95Ms"`
-	mu           sync.RWMutex `json:"-"`
+	Mu           sync.RWMutex `json:"-"`
 }
 
 type HealthInfo struct {
@@ -47,16 +47,15 @@ type NodeInfo struct {
 	NodeID     string       `json:"nodeId"`
 	Status     NodeStatus   `json:"status"`
 	BaseURL    string       `json:"baseUrl"`
-	Weight     float64      `json:"weight,omitempty"` // ノードの重み
 	HealthInfo HealthInfo   `json:"healthInfo"`
-	mu         sync.RWMutex `json:"-"`
+	Mu         sync.RWMutex `json:"-"`
 }
 
 // 必要の場合はatomic.Pointerでラップして使うこと
 
 func (node *NodeInfo) Clone() NodeInfo {
-	node.mu.RLock()
-	defer node.mu.RUnlock()
+	node.Mu.RLock()
+	defer node.Mu.RUnlock()
 
 	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
 	copy(datasources, node.HealthInfo.Datasources)
@@ -65,7 +64,6 @@ func (node *NodeInfo) Clone() NodeInfo {
 		NodeID:  node.NodeID,
 		Status:  node.Status,
 		BaseURL: node.BaseURL,
-		Weight:  node.Weight,
 		HealthInfo: HealthInfo{
 			MaxHttpSessions: node.HealthInfo.MaxHttpSessions,
 			RunningHttp:     node.HealthInfo.RunningHttp,

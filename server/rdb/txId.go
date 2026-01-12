@@ -12,10 +12,11 @@ import (
 const (
 	txIDVersion         = 1
 	txIDVersionSize     = 1
+	ownerNodeShortSize  = 2
 	datasourceShortSize = 2
 	issuedAtMsSize      = 8
 	randomSize          = 16
-	txIDPayloadSize     = txIDVersionSize + datasourceShortSize + issuedAtMsSize + randomSize
+	txIDPayloadSize     = txIDVersionSize + ownerNodeShortSize + datasourceShortSize + issuedAtMsSize + randomSize
 )
 
 var (
@@ -25,7 +26,7 @@ var (
 
 // TxInfo contains decoded transaction ID information
 type TxInfo struct {
-	DsShort  uint16
+	DsIndex  uint16
 	IssuedAt time.Time
 }
 
@@ -40,7 +41,7 @@ func NewTxIDGenerator() *TxIDGenerator {
 
 // Generate creates a new transaction ID
 // Format: base64url( version|ownerNodeShort|datasourceShort|issuedAtMs|random16|hmac32 )
-func (g *TxIDGenerator) Generate(dsShort uint16) (string, error) {
+func (g *TxIDGenerator) Generate(nodeIndex int, datasourceIndex int) (string, error) {
 	// Allocate buffer for payload
 	payload := make([]byte, txIDPayloadSize)
 	offset := 0
@@ -49,8 +50,12 @@ func (g *TxIDGenerator) Generate(dsShort uint16) (string, error) {
 	payload[offset] = txIDVersion
 	offset += txIDVersionSize
 
+	// ownerNodeShort: 2 bytes
+	binary.BigEndian.PutUint16(payload[offset:], uint16(nodeIndex))
+	offset += ownerNodeShortSize
+
 	// datasourceShort: 2 bytes
-	binary.BigEndian.PutUint16(payload[offset:], dsShort)
+	binary.BigEndian.PutUint16(payload[offset:], uint16(datasourceIndex))
 	offset += datasourceShortSize
 
 	// issuedAtMs: 8 bytes (uint64)
@@ -92,8 +97,11 @@ func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
 	}
 	offset += txIDVersionSize
 
+	// ownerNodeShort: 2 bytes
+	offset += ownerNodeShortSize
+
 	// datasourceShort: 2 bytes
-	dsShort := binary.BigEndian.Uint16(payload[offset:])
+	dsIndex := binary.BigEndian.Uint16(payload[offset:])
 	offset += datasourceShortSize
 
 	// issuedAtMs: 8 bytes
@@ -101,7 +109,7 @@ func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
 	issuedAt := time.UnixMilli(int64(issuedAtMs))
 
 	return &TxInfo{
-		DsShort:  dsShort,
+		DsIndex:  dsIndex,
 		IssuedAt: issuedAt,
 	}, nil
 }

@@ -21,7 +21,6 @@ type Config struct {
 	NodeID          string              `yaml:"nodeId"`
 	NodePort        int                 `yaml:"nodePort"`
 	MaxHttpSessions int                 `yaml:"maxHttpSessions"`
-	Weight          float64             `yaml:"weight"`
 	Cluster         []ClusterNodeConfig `yaml:"cluster"`
 	Datasources     []DatasourceConfig  `yaml:"datasources"`
 }
@@ -33,6 +32,7 @@ type ClusterNodeConfig struct {
 
 type DatasourceConfig struct {
 	DatasourceID                 string `yaml:"datasourceId"`
+	DatabaseName                 string `yaml:"databaseName"`
 	Driver                       string `yaml:"driver"`
 	DSN                          string `yaml:"dsn"`
 	MaxOpenConns                 int    `yaml:"maxOpenConns"`
@@ -71,11 +71,11 @@ func main() {
 
 	// Initialize cluster health info
 	// Initialize datasources
-	datasources := rdb.NewDatasources()
-	dsConfigs := make([]rdb.DatasourceConfig, len(config.Datasources))
+	dsConfigs := make([]rdb.Config, len(config.Datasources))
 	for i, ds := range config.Datasources {
-		dsConfigs[i] = rdb.DatasourceConfig{
+		dsConfigs[i] = rdb.Config{
 			DatasourceID:                 ds.DatasourceID,
+			DatabaseName:                 ds.DatabaseName,
 			Driver:                       ds.Driver,
 			DSN:                          ds.DSN,
 			MaxOpenConns:                 ds.MaxOpenConns,
@@ -86,7 +86,8 @@ func main() {
 			Readonly:                     ds.Readonly,
 		}
 	}
-	if err := datasources.Initialize(dsConfigs); err != nil {
+	datasources, err := rdb.Initialize(dsConfigs)
+	if err != nil {
 		log.Fatalf("Failed to initialize datasources: %v", err)
 	}
 	log.Printf("Initialized %d datasource(s)", len(config.Datasources))
@@ -108,10 +109,9 @@ func main() {
 		NodeID:  config.NodeID,
 		Status:  cluster.STARTING,
 		BaseURL: fmt.Sprintf("http://localhost:%d", config.NodePort),
-		Weight:  config.Weight,
 		HealthInfo: cluster.HealthInfo{
 			MaxHttpSessions: config.MaxHttpSessions,
-			DatasourceInfo:  []cluster.DatasourceInfo{},
+			Datasources:     []cluster.DatasourceInfo{},
 		},
 	}
 
@@ -148,8 +148,8 @@ func main() {
 
 	go func() {
 		for {
-			time.Sleep(time.Duration(rand.Intn(1000)+2000) * time.Millisecond) // 2-3秒ランダム待ち
-			balancer.CollectHealth()
+			time.Sleep(time.Duration(rand.Intn(2000)+2000) * time.Millisecond) // 2-4秒ランダム待ち
+			router.CollectHealth()
 		}
 	}()
 
@@ -171,7 +171,7 @@ func main() {
 	txManager.Shutdown()
 
 	// Close datasources
-	if err := datasources.Close(); err != nil {
+	if err := datasources.CloseAll(); err != nil {
 		log.Printf("Error closing datasources: %v", err)
 	}
 

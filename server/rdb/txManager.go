@@ -16,13 +16,13 @@ var (
 
 // TxEntry represents a transaction entry
 type TxEntry struct {
-	TxID         string
-	DatasourceID string
-	Conn         *sql.Conn
-	Tx           *sql.Tx
-	ExpiresAt    time.Time
-	LastTouch    time.Time
-	mu           sync.RWMutex
+	TxID      string
+	DsIdx     int
+	Conn      *sql.Conn
+	Tx        *sql.Tx
+	ExpiresAt time.Time
+	LastTouch time.Time
+	mu        sync.RWMutex
 }
 
 // Touch updates the expiration time and last touch time
@@ -46,8 +46,8 @@ type TxManager struct {
 	datasources *Datasources
 	txIDGen     *TxIDGenerator
 	entries     map[string]*TxEntry
-	mu          sync.RWMutex
 	stopCleanup chan struct{}
+	mu          sync.RWMutex
 	wg          sync.WaitGroup
 }
 
@@ -68,19 +68,19 @@ func NewTxManager(datasources *Datasources, txIDGen *TxIDGenerator) *TxManager {
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(rCtx context.Context, datasourceID string, isolationLevel sql.IsolationLevel, executeTimeoutMs int) (*TxEntry, error) {
+func (tm *TxManager) Begin(reqCtx context.Context, nodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, executeTimeoutMs *int) (*TxEntry, error) {
 	// Get database connection
-	ds, ok := tm.datasources.Get(datasourceID)
+	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
 		return nil, fmt.Errorf("datasource not found: %s", ds.DatasourceID)
 	}
 
-	timeout := executeTimeoutMs
-	if executeTimeoutMs <= 0 {
-		timeout = ds.DefaultExecuteTimeoutSeconds * 1000
+	timeout := time.Duration(ds.DefaultExecuteTimeoutSeconds) * time.Second
+	if executeTimeoutMs != nil && *executeTimeoutMs > 0 {
+		timeout = time.Duration(*executeTimeoutMs)
 	}
-	expiresAt := time.Now().Add(time.Duration(timeout) * time.Millisecond)
-	ctx, cancel := context.WithTimeout(rCtx, time.Duration(timeout)*time.Millisecond)
+	expiresAt := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(reqCtx, timeout)
 	defer cancel()
 
 	conn, err := ds.DB.Conn(ctx)
@@ -98,7 +98,7 @@ func (tm *TxManager) Begin(rCtx context.Context, datasourceID string, isolationL
 	}
 
 	// Generate transaction ID
-	txID, err := tm.txIDGen.Generate(ds.shortID)
+	txID, err := tm.txIDGen.Generate(nodeIndex, datasourceIdx)
 	if err != nil {
 		tx.Rollback()
 		conn.Close()
@@ -108,12 +108,12 @@ func (tm *TxManager) Begin(rCtx context.Context, datasourceID string, isolationL
 	// Create entry
 	now := time.Now()
 	entry := &TxEntry{
-		TxID:         txID,
-		DatasourceID: ds.DatasourceID,
-		Conn:         conn,
-		Tx:           tx,
-		ExpiresAt:    expiresAt,
-		LastTouch:    now,
+		TxID:      txID,
+		DsIdx:     datasourceIdx,
+		Conn:      conn,
+		Tx:        tx,
+		ExpiresAt: expiresAt,
+		LastTouch: now,
 	}
 
 	// Register entry
@@ -207,21 +207,41 @@ func (tm *TxManager) Rollback(txID string) error {
 }
 
 // QueryContext queries the database
-func (tm *TxManager) QueryContext(ctx context.Context, sql string, args ...interface{}) (*sql.Rows, error) {
-	ds, ok := tm.datasources.Get("main")
+func (tm *TxManager) QueryContext(ctx context.Context, datasourceIdx int, sql string, args ...interface{}) (*sql.Rows, error) {
+	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
-		return nil, fmt.Errorf("datasource not found: %s", "main")
+		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
 	return ds.DB.QueryContext(ctx, sql, args...)
 }
 
 // ExecContext executes the database
-func (tm *TxManager) ExecContext(ctx context.Context, sql string, args ...interface{}) (sql.Result, error) {
-	ds, ok := tm.datasources.Get("main")
+func (tm *TxManager) ExecContext(ctx context.Context, datasourceIdx int, sql string, args ...interface{}) (sql.Result, error) {
+	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
-		return nil, fmt.Errorf("datasource not found: %s", "main")
+		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
 	return ds.DB.ExecContext(ctx, sql, args...)
+}
+
+func (tm *TxManager) Statistics(datasourceIdx int) (int, int, int) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	ds, _ := tm.datasources.Get(datasourceIdx)
+	stats := ds.DB.Stats()
+	openConns := stats.OpenConnections
+	idleConns := stats.Idle
+	//waitConns := int(stats.WaitCount)
+
+	runningTx := 0
+	for _, entry := range tm.entries {
+		if entry.DsIdx == datasourceIdx {
+			runningTx++
+		}
+	}
+
+	return openConns, idleConns, runningTx
 }
 
 // cleanupExpired periodically cleans up expired transactions
@@ -260,20 +280,6 @@ func (tm *TxManager) cleanup() {
 		entry.Tx.Rollback()
 		entry.Conn.Close()
 	}
-}
-
-// GetRunningTxCount returns the number of running transactions for a datasource
-func (tm *TxManager) GetRunningTxCount(datasourceID string) int {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-
-	count := 0
-	for _, entry := range tm.entries {
-		if entry.DatasourceID == datasourceID {
-			count++
-		}
-	}
-	return count
 }
 
 // GetDatasources returns the datasources instance

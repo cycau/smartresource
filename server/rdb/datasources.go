@@ -11,8 +11,9 @@ import (
 )
 
 // DatasourceConfig represents configuration for a single datasource
-type DatasourceConfig struct {
+type Config struct {
 	DatasourceID                 string
+	DatabaseName                 string
 	Driver                       string
 	DSN                          string
 	MaxOpenConns                 int
@@ -25,7 +26,7 @@ type DatasourceConfig struct {
 
 type Datasource struct {
 	DatasourceID                 string
-	shortID                      uint16
+	DatabaseName                 string
 	Driver                       string
 	DefaultExecuteTimeoutSeconds int
 	DB                           *sql.DB
@@ -34,30 +35,23 @@ type Datasource struct {
 
 // Datasources holds a map of datasource ID to *sql.DB
 type Datasources struct {
-	dsMap          map[string]*Datasource
-	dsShortMap     map[string]uint16 // datasourceId -> short ID
-	dsShortReverse map[uint16]string // short ID -> datasourceId
-}
-
-// NewDatasources creates a new Datasources instance
-func NewDatasources() *Datasources {
-	return &Datasources{
-		dsMap:          make(map[string]*Datasource),
-		dsShortMap:     make(map[string]uint16),
-		dsShortReverse: make(map[uint16]string),
-	}
+	dss     []*Datasource
+	dsIdMap map[string]uint16 // datasourceId -> index
 }
 
 // Initialize initializes datasources from configuration
-func (d *Datasources) Initialize(configs []DatasourceConfig) error {
+func Initialize(configs []Config) (*Datasources, error) {
+	d := &Datasources{
+		dss:     make([]*Datasource, 0, len(configs)),
+		dsIdMap: make(map[string]uint16, len(configs)),
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Build datasource short ID mapping (temporary implementation: index + 1)
 	for i, cfg := range configs {
-		shortID := uint16(i + 1)
-		d.dsShortMap[cfg.DatasourceID] = shortID
-		d.dsShortReverse[shortID] = cfg.DatasourceID
+		d.dsIdMap[cfg.DatasourceID] = uint16(i)
 
 		driverName := cfg.Driver
 		if driverName == "postgres" {
@@ -66,7 +60,7 @@ func (d *Datasources) Initialize(configs []DatasourceConfig) error {
 
 		db, err := sql.Open(driverName, cfg.DSN)
 		if err != nil {
-			return fmt.Errorf("failed to open datasource %s: %w", cfg.DatasourceID, err)
+			return nil, fmt.Errorf("failed to open datasource %s: %w", cfg.DatasourceID, err)
 		}
 
 		// Set connection pool settings
@@ -79,12 +73,12 @@ func (d *Datasources) Initialize(configs []DatasourceConfig) error {
 		// Ping to verify connection
 		if err := db.PingContext(ctx); err != nil {
 			db.Close()
-			return fmt.Errorf("failed to ping datasource %s: %w", cfg.DatasourceID, err)
+			return nil, fmt.Errorf("failed to ping datasource %s: %w", cfg.DatasourceID, err)
 		}
 
-		d.dsMap[cfg.DatasourceID] = &Datasource{
+		d.dss[i] = &Datasource{
 			DatasourceID:                 cfg.DatasourceID,
-			shortID:                      shortID,
+			DatabaseName:                 cfg.DatabaseName,
 			Driver:                       driverName,
 			DefaultExecuteTimeoutSeconds: cfg.DefaultExecuteTimeoutSeconds,
 			DB:                           db,
@@ -92,39 +86,27 @@ func (d *Datasources) Initialize(configs []DatasourceConfig) error {
 		}
 	}
 
-	return nil
-}
-
-// Get returns a *sql.DB for the given datasource ID
-func (d *Datasources) Get(datasourceID string) (*Datasource, bool) {
-	ds, ok := d.dsMap[datasourceID]
-	return ds, ok
-}
-
-// Set sets a *sql.DB for the given datasource ID
-func (d *Datasources) Set(datasourceID string, db *sql.DB) {
-	d.dsMap[datasourceID] = &Datasource{
-		DatasourceID: datasourceID,
-		DB:           db,
-	}
+	return d, nil
 }
 
 // GetDatasourceShort returns the short ID for a datasource ID
-func (d *Datasources) GetDatasourceShort(datasourceID string) (uint16, bool) {
-	shortID, ok := d.dsShortMap[datasourceID]
-	return shortID, ok
+func (d *Datasources) Get(datasourceIdx int) (*Datasource, bool) {
+	if datasourceIdx < 0 || datasourceIdx >= len(d.dss) {
+		return nil, false
+	}
+	return d.dss[datasourceIdx], true
 }
 
-// GetDatasourceID returns the datasource ID for a short ID
-func (d *Datasources) GetDatasourceID(shortID uint16) (string, bool) {
-	datasourceID, ok := d.dsShortReverse[shortID]
-	return datasourceID, ok
+// Get returns a *sql.DB for the given datasource ID
+func (d *Datasources) GetById(datasourceID string) (*Datasource, bool) {
+	ds, ok := d.dsIdMap[datasourceID]
+	return d.dss[ds], ok
 }
 
 // Close closes all database connections
-func (d *Datasources) Close() error {
+func (d *Datasources) CloseAll() error {
 	var firstErr error
-	for _, db := range d.dsMap {
+	for _, db := range d.dss {
 		if err := db.DB.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
