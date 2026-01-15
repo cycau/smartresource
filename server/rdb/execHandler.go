@@ -10,20 +10,40 @@ import (
 	"smartdatastream/server/cluster"
 	"sync"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 // ExecuteRequest represents the request body for /v1/rdb/execute
 type ExecuteRequest struct {
-	SQL       string       `json:"sql"`
-	Params    []ParamValue `json:"params,omitempty"`
-	TxID      *string      `json:"txId,omitempty"`
-	TimeoutMs *int         `json:"timeoutMs,omitempty"`
-	LimitRows *int         `json:"limitRows,omitempty"`
+	SQL        string       `json:"sql"`
+	Params     []ParamValue `json:"params,omitempty"`
+	TxID       *string      `json:"txId,omitempty"`
+	TimeoutSec *int         `json:"timeoutSec,omitempty"`
+	LimitRows  *int         `json:"limitRows,omitempty"`
 }
+
+// INT, LONG, DOUBLE, DECIMAL, BOOL
+// DATE, DATETIME
+// STRING, BINARY
+type ValueType string
+
+const (
+	NULL     ValueType = "NULL"
+	INT      ValueType = "INT"
+	LONG     ValueType = "LONG"
+	DOUBLE   ValueType = "DOUBLE"
+	DECIMAL  ValueType = "DECIMAL"
+	BOOL     ValueType = "BOOL"
+	DATE     ValueType = "DATE"
+	DATETIME ValueType = "DATETIME"
+	STRING   ValueType = "STRING"
+	BINARY   ValueType = "BINARY"
+)
 
 // ParamValue represents a parameter value
 type ParamValue struct {
-	Type  string      `json:"type"`
+	Type  ValueType   `json:"type"`
 	Value interface{} `json:"value,omitempty"`
 }
 
@@ -70,8 +90,7 @@ func NewExecHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *ExecHandl
 
 func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	dsIDX, req, args, ctx, cancel, err := exec.parseRequest(r)
-	defer cancel()
+	dsIDX, req, args, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
@@ -84,22 +103,11 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	var rows *sql.Rows
 	var queryErr error
 
-	if req.TxID != nil {
-		// Get transaction entry
-		entry, err := exec.txManager.Get(*req.TxID)
-		if err != nil {
-			if err == ErrTxNotFound || err == ErrTxExpired {
-				writeError(w, http.StatusConflict, "TX_NOT_FOUND", fmt.Sprintf("Transaction not found or expired: %v", err))
-				return
-			}
-			writeError(w, http.StatusServiceUnavailable, "TX_ERROR", fmt.Sprintf("Failed to get transaction: %v", err))
-			return
-		}
-
-		// Execute query in transaction
-		rows, queryErr = entry.Tx.QueryContext(ctx, req.SQL, args...)
+	if req.TxID == nil {
+		// Execute query without transaction
+		rows, queryErr = exec.txManager.Query(r.Context(), dsIDX, req.SQL, args...)
 		if queryErr != nil {
-			if ctx.Err() == context.DeadlineExceeded {
+			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
@@ -110,10 +118,10 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 	} else {
-		// Execute query without transaction
-		rows, queryErr = exec.txManager.QueryContext(ctx, dsIDX, req.SQL, args...)
+		// Execute query in transaction
+		rows, queryErr = exec.txManager.QueryTx(r.Context(), *req.TimeoutSec, *req.TxID, req.SQL, args...)
 		if queryErr != nil {
-			if ctx.Err() == context.DeadlineExceeded {
+			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
@@ -216,15 +224,14 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		Rows: resultRows,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
 
 func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	dsIDX, req, args, ctx, cancel, err := exec.parseRequest(r)
-	defer cancel()
+	dsIDX, req, args, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
@@ -237,22 +244,11 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	var result sql.Result
 	var execErr error
 
-	if req.TxID != nil {
-		// Get transaction entry
-		entry, err := exec.txManager.Get(*req.TxID)
-		if err != nil {
-			if err == ErrTxNotFound || err == ErrTxExpired {
-				writeError(w, http.StatusConflict, "TX_NOT_FOUND", fmt.Sprintf("Transaction not found or expired: %v", err))
-				return
-			}
-			writeError(w, http.StatusServiceUnavailable, "TX_ERROR", fmt.Sprintf("Failed to get transaction: %v", err))
-			return
-		}
-
-		// Execute in transaction
-		result, execErr = entry.Tx.ExecContext(ctx, req.SQL, args...)
+	if req.TxID == nil {
+		// Get database
+		result, execErr = exec.txManager.Exec(r.Context(), dsIDX, req.SQL, args...)
 		if execErr != nil {
-			if ctx.Err() == context.DeadlineExceeded {
+			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
@@ -262,10 +258,10 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// Get database
-		result, execErr = exec.txManager.ExecContext(ctx, dsIDX, req.SQL, args...)
+		// Execute in transaction
+		result, execErr = exec.txManager.ExecTx(r.Context(), *req.TimeoutSec, *req.TxID, req.SQL, args...)
 		if execErr != nil {
-			if ctx.Err() == context.DeadlineExceeded {
+			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
@@ -295,7 +291,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		ExecutionTimeMs: executionTimeMs,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 }
@@ -305,11 +301,11 @@ func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
 	// Find or create datasource info
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
 	dsInfo.Mu.Lock()
-	defer dsInfo.Mu.Unlock()
 	dsInfo.RunningSql += delta
 	if dsInfo.RunningSql < 0 {
 		dsInfo.RunningSql = 0
 	}
+	dsInfo.Mu.Unlock()
 }
 
 func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
@@ -352,43 +348,33 @@ Body:
 		"limitRows": 1000
 	}
 */
-func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []interface{}, context.Context, context.CancelFunc, error) {
+func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []interface{}, error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return -1, ExecuteRequest{}, nil, nil, nil, fmt.Errorf("failed to parse request: %w", err)
+		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// get datasourceId from context
-	dsIDX, ok := r.Context().Value("dsIDX").(int)
+	dsIDX, ok := r.Context().Value("$S_IDX").(int)
 	if !ok {
-		return -1, ExecuteRequest{}, nil, nil, nil, fmt.Errorf("datasource INDEX is required")
-	}
-	if dsIDX < 0 || dsIDX >= len(exec.selfNode.HealthInfo.Datasources) {
-		return -1, ExecuteRequest{}, nil, nil, nil, fmt.Errorf("invalid datasource INDEX: %d", dsIDX)
+		return -1, ExecuteRequest{}, nil, fmt.Errorf("Datasource INDEX hasn't decided")
 	}
 
 	// Convert params
 	args, err := convertParams(req.Params)
 	if err != nil {
-		return -1, ExecuteRequest{}, nil, nil, nil, fmt.Errorf("failed to convert params: %w", err)
+		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to convert params: %w", err)
 	}
 
-	// Set timeout
-	timeout := 30 * time.Second
-	if req.TimeoutMs != nil && *req.TimeoutMs > 0 {
-		timeout = time.Duration(*req.TimeoutMs) * time.Millisecond
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	return dsIDX, req, args, ctx, cancel, nil
+	return dsIDX, req, args, nil
 }
 
 /************************************************************
  * Private methods
  ************************************************************/
 
-func convertParams(params []ParamValue) ([]interface{}, error) {
-	args := make([]interface{}, len(params))
+func convertParams(params []ParamValue) ([]any, error) {
+	args := make([]any, len(params))
 	for i, p := range params {
 		arg, err := convertParam(p)
 		if err != nil {
@@ -399,36 +385,90 @@ func convertParams(params []ParamValue) ([]interface{}, error) {
 	return args, nil
 }
 
-func convertParam(p ParamValue) (interface{}, error) {
-	switch p.Type {
-	case "null":
+func convertParam(p ParamValue) (any, error) {
+	if p.Value == nil {
 		return nil, nil
-	case "int32":
-		if val, ok := p.Value.(float64); ok {
-			return int32(val), nil
+	}
+
+	switch p.Type {
+	case NULL:
+		return nil, nil
+	case INT:
+		if val, ok := p.Value.(int32); ok {
+			return val, nil
+		}
+		if val, ok := p.Value.(string); ok {
+			var intVal int32
+			_, err := fmt.Sscanf(val, "%d", &intVal)
+			if err != nil {
+				return nil, fmt.Errorf("invalid int32 string: %v", err)
+			}
+			return intVal, nil
 		}
 		return nil, fmt.Errorf("invalid int32 value: %v", p.Value)
-	case "int64":
-		if val, ok := p.Value.(float64); ok {
-			return int64(val), nil
+	case LONG:
+		if val, ok := p.Value.(int64); ok {
+			return val, nil
+		}
+		if val, ok := p.Value.(string); ok {
+			var intVal int64
+			_, err := fmt.Sscanf(val, "%d", &intVal)
+			if err != nil {
+				return nil, fmt.Errorf("invalid int64 string: %v", err)
+			}
+			return intVal, nil
 		}
 		return nil, fmt.Errorf("invalid int64 value: %v", p.Value)
-	case "float64":
+	case DOUBLE:
+		if val, ok := p.Value.(float32); ok {
+			return val, nil
+		}
 		if val, ok := p.Value.(float64); ok {
 			return val, nil
 		}
+		if val, ok := p.Value.(string); ok {
+			var floatVal float64
+			_, err := fmt.Sscanf(val, "%f", &floatVal)
+			if err != nil {
+				return nil, fmt.Errorf("invalid float64 string: %v", err)
+			}
+			return floatVal, nil
+		}
 		return nil, fmt.Errorf("invalid float64 value: %v", p.Value)
-	case "bool":
+	case DECIMAL:
+		if val, ok := p.Value.(decimal.Decimal); ok {
+			return val, nil
+		}
+		if val, ok := p.Value.(string); ok {
+			dec, err := decimal.NewFromString(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid decimal string: %w", err)
+			}
+			return dec, nil
+		}
+		return nil, fmt.Errorf("invalid decimal value: %v", p.Value)
+	case BOOL:
 		if val, ok := p.Value.(bool); ok {
 			return val, nil
 		}
+		if val, ok := p.Value.(string); ok {
+			switch val {
+			case "true":
+				return true, nil
+			case "false":
+				return false, nil
+			}
+		}
 		return nil, fmt.Errorf("invalid bool value: %v", p.Value)
-	case "text":
+	case STRING:
 		if val, ok := p.Value.(string); ok {
 			return val, nil
 		}
-		return nil, fmt.Errorf("invalid text value: %v", p.Value)
-	case "bytes_base64":
+		return fmt.Sprintf("%v", p.Value), nil
+	case BINARY:
+		if val, ok := p.Value.([]byte); ok {
+			return val, nil
+		}
 		if val, ok := p.Value.(string); ok {
 			decoded, err := base64.StdEncoding.DecodeString(val)
 			if err != nil {
@@ -437,7 +477,10 @@ func convertParam(p ParamValue) (interface{}, error) {
 			return decoded, nil
 		}
 		return nil, fmt.Errorf("invalid bytes_base64 value: %v", p.Value)
-	case "timestamp_rfc3339":
+	case DATE, DATETIME:
+		if val, ok := p.Value.(time.Time); ok {
+			return val, nil
+		}
 		if val, ok := p.Value.(string); ok {
 			t, err := time.Parse(time.RFC3339, val)
 			if err != nil {
@@ -451,7 +494,7 @@ func convertParam(p ParamValue) (interface{}, error) {
 	}
 }
 
-func convertValue(val interface{}) interface{} {
+func convertValue(val any) any {
 	if val == nil {
 		return nil
 	}
@@ -461,20 +504,22 @@ func convertValue(val interface{}) interface{} {
 		return base64.StdEncoding.EncodeToString(v)
 	case time.Time:
 		return v.Format(time.RFC3339)
+	case decimal.Decimal:
+		return v.String()
 	case int64, int32, int, float64, bool, string:
 		return v
 	default:
-		// Try to convert to string
-		return fmt.Sprintf("%v", v)
+		// Return the value as-is to let JSON encoder handle it
+		return v
 	}
 }
 
 func writeError(w http.ResponseWriter, statusCode int, code, message string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(statusCode)
 
-	errorResp := map[string]interface{}{
-		"error": map[string]interface{}{
+	errorResp := map[string]any{
+		"error": map[string]any{
 			"code":    code,
 			"message": message,
 		},
