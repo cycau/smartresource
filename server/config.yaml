@@ -1,35 +1,36 @@
 nodeId: "dbapi-1"
-nodePort: 8080
+nodePort: 5678
 maxHttpSessions: 1000
-weight: 1.0
-secretKey: "change-me"  #
-
-cluster:
-  - nodeId: "dbapi-1"
-    baseUrl: "https://sqlgw-1.example.com"
-  - nodeId: "dbapi-2"
-    baseUrl: "https://sqlgw-2.example.com"
-  - nodeId: "dbapi-3"
-    baseUrl: "https://sqlgw-3.example.com"
+secretKey: "change-me"
 
 datasources:
   - datasourceId: pg_master
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
+    dsn: "postgres://user:password@localhost:25432/incident_manager"
     maxOpenConns: 100
     minIdleConns: 10
     maxTransactionConns: 5
-    connMaxLifetimeSeconds: 1800
-    defaultExecuteTimeoutSeconds: 300
+    connMaxLifetimeSec: 1800
+    defaultTxTimeoutSec: 300
+    defaultQueryTimeoutSec: 30
     readonly: false
   - datasourceId: pg_slave01
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
+    dsn: "postgres://user:password@localhost:25432/incident_manager"
     maxOpenConns: 50
     minIdleConns: 5
     maxTransactionConns: 0
-    connMaxLifetimeSeconds: 1800
-    defaultExecuteTimeoutSeconds: 300
+    connMaxLifetimeSec: 1800
+    defaultTxTimeoutSec: 300
+    defaultQueryTimeoutSec: 30
     readonly: true
+
+cluster:
+  - nodeId: "dbapi-1"
+    baseUrl: "http://localhost:5678"
+  - nodeId: "dbapi-2"
+    baseUrl: "http://localhost:5678"
+  - nodeId: "dbapi-3"
+    baseUrl: "http://localhost:5678"
