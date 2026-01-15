@@ -12,8 +12,8 @@ import (
 
 // BeginTxRequest represents the request body for /v1/rdb/tx/begin
 type BeginTxRequest struct {
-	ClientNodeIndex int  `json:"clientNodeIndex"`
-	TimeoutMs       *int `json:"timeoutMs,omitempty"`
+	ClientNodeIndex int `json:"clientNodeIndex"`
+	TimeoutSec      int `json:"timeoutSec,omitempty"`
 }
 
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
@@ -56,7 +56,7 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := tx.txManager.Begin(r.Context(), req.ClientNodeIndex, dsIDX, sql.LevelReadCommitted, req.TimeoutMs)
+	txEntry, err := tx.txManager.Begin(req.ClientNodeIndex, dsIDX, sql.LevelReadCommitted, req.TimeoutSec)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
@@ -159,7 +159,7 @@ func (tx *TxHandler) parseRequest(r *http.Request) (int, BeginTxRequest, error) 
 	}
 
 	// get datasourceId from context
-	dsIDX, ok := r.Context().Value("dsIDX").(int)
+	dsIDX, ok := r.Context().Value("$S_IDX").(int)
 	if !ok {
 		return -1, BeginTxRequest{}, fmt.Errorf("datasource INDEX is required")
 	}
