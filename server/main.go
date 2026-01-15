@@ -20,6 +20,7 @@ import (
 type Config struct {
 	NodeID          string              `yaml:"nodeId"`
 	NodePort        int                 `yaml:"nodePort"`
+	SecretKey       string              `yaml:"secretKey"`
 	MaxHttpSessions int                 `yaml:"maxHttpSessions"`
 	Cluster         []ClusterNodeConfig `yaml:"cluster"`
 	Datasources     []DatasourceConfig  `yaml:"datasources"`
@@ -31,16 +32,17 @@ type ClusterNodeConfig struct {
 }
 
 type DatasourceConfig struct {
-	DatasourceID                 string `yaml:"datasourceId"`
-	DatabaseName                 string `yaml:"databaseName"`
-	Driver                       string `yaml:"driver"`
-	DSN                          string `yaml:"dsn"`
-	MaxOpenConns                 int    `yaml:"maxOpenConns"`
-	MinIdleConns                 int    `yaml:"minIdleConns"`
-	MaxTransactionConns          int    `yaml:"maxTransactionConns"`
-	ConnMaxLifetimeSeconds       int    `yaml:"connMaxLifetimeSeconds"`
-	DefaultExecuteTimeoutSeconds int    `yaml:"defaultExecuteTimeoutSeconds"`
-	Readonly                     bool   `yaml:"readonly"`
+	DatasourceID           string `yaml:"datasourceId"`
+	DatabaseName           string `yaml:"databaseName"`
+	Driver                 string `yaml:"driver"`
+	DSN                    string `yaml:"dsn"`
+	MaxOpenConns           int    `yaml:"maxOpenConns"`
+	MinIdleConns           int    `yaml:"minIdleConns"`
+	MaxTransactionConns    int    `yaml:"maxTransactionConns"`
+	ConnMaxLifetimeSeconds int    `yaml:"connMaxLifetimeSeconds"`
+	DefaultTxTimeoutSec    int    `yaml:"defaultTxTimeoutSec"`
+	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
+	Readonly               bool   `yaml:"readonly"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -72,18 +74,30 @@ func main() {
 	// Initialize cluster health info
 	// Initialize datasources
 	dsConfigs := make([]rdb.Config, len(config.Datasources))
+	hzDatasources := make([]cluster.DatasourceInfo, len(config.Datasources))
 	for i, ds := range config.Datasources {
 		dsConfigs[i] = rdb.Config{
-			DatasourceID:                 ds.DatasourceID,
-			DatabaseName:                 ds.DatabaseName,
-			Driver:                       ds.Driver,
-			DSN:                          ds.DSN,
-			MaxOpenConns:                 ds.MaxOpenConns,
-			MinIdleConns:                 ds.MinIdleConns,
-			MaxTransactionConns:          ds.MaxTransactionConns,
-			ConnMaxLifetimeSeconds:       ds.ConnMaxLifetimeSeconds,
-			DefaultExecuteTimeoutSeconds: ds.DefaultExecuteTimeoutSeconds,
-			Readonly:                     ds.Readonly,
+			DatasourceID:           ds.DatasourceID,
+			DatabaseName:           ds.DatabaseName,
+			Driver:                 ds.Driver,
+			DSN:                    ds.DSN,
+			MaxOpenConns:           ds.MaxOpenConns,
+			MinIdleConns:           ds.MinIdleConns,
+			MaxTransactionConns:    ds.MaxTransactionConns,
+			ConnMaxLifetimeSeconds: ds.ConnMaxLifetimeSeconds,
+			DefaultTxTimeoutSec:    ds.DefaultTxTimeoutSec,
+			DefaultQueryTimeoutSec: ds.DefaultQueryTimeoutSec,
+			Readonly:               ds.Readonly,
+		}
+
+		hzDatasources[i] = cluster.DatasourceInfo{
+			DatasourceID: ds.DatasourceID,
+			DatabaseName: ds.DatabaseName,
+			Active:       true,
+			Readonly:     ds.Readonly,
+			MaxOpenConns: ds.MaxOpenConns,
+			MinIdleConns: ds.MinIdleConns,
+			MaxTxConns:   ds.MaxTransactionConns,
 		}
 	}
 	datasources, err := rdb.Initialize(dsConfigs)
@@ -106,26 +120,27 @@ func main() {
 	log.Printf("HTTP connection limit: %d", maxHttpSessions)
 
 	selfNode := &cluster.NodeInfo{
-		NodeID:  config.NodeID,
-		Status:  cluster.STARTING,
-		BaseURL: fmt.Sprintf("http://localhost:%d", config.NodePort),
+		NodeID:    config.NodeID,
+		Status:    cluster.STARTING,
+		BaseURL:   "-",
+		SecretKey: config.SecretKey,
 		HealthInfo: cluster.HealthInfo{
 			MaxHttpSessions: config.MaxHttpSessions,
-			Datasources:     []cluster.DatasourceInfo{},
+			Datasources:     hzDatasources,
 		},
 	}
 
 	// collect cluster health information
-	otherNodes := make([]cluster.NodeInfo, len(config.Cluster)-1)
-	for i, node := range config.Cluster {
+	otherNodes := make([]cluster.NodeInfo, 0, len(config.Cluster))
+	for _, node := range config.Cluster {
 		if node.NodeID == config.NodeID {
 			continue
 		}
-		otherNodes[i] = cluster.NodeInfo{
+		otherNodes = append(otherNodes, cluster.NodeInfo{
 			NodeID:  node.NodeID,
 			Status:  cluster.STARTING,
 			BaseURL: node.BaseURL,
-		}
+		})
 	}
 	balancer := cluster.NewBalancer(selfNode, otherNodes)
 
@@ -146,9 +161,17 @@ func main() {
 		}
 	}()
 
+	// collect once at startup
+	router.CollectHealth()
+	time.Sleep(1000 * time.Millisecond) // wait for collection
+	selfNode.Mu.Lock()
+	selfNode.Status = cluster.SERVING
+	selfNode.HealthInfo.UpTime = time.Now()
+	selfNode.Mu.Unlock()
+
 	go func() {
 		for {
-			time.Sleep(time.Duration(rand.Intn(2000)+2000) * time.Millisecond) // 2-4秒ランダム待ち
+			time.Sleep(time.Duration(3000+rand.Intn(2000)) * time.Millisecond) // 3-5秒ランダム待ち
 			router.CollectHealth()
 		}
 	}()
