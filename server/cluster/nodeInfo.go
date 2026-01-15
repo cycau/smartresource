@@ -6,12 +6,15 @@ import (
 )
 
 type DatasourceInfo struct {
-	DatasourceID string `json:"datasourceId"`
-	DatabaseName string `json:"databaseName"`
-	Active       bool   `json:"active"`
-	Readonly     bool   `json:"readonly"`
-	MaxOpenConns int    `json:"maxOpenConns"`
-	MaxTxConns   int    `json:"maxTxConns"`
+	DatasourceID           string `json:"datasourceId"`
+	DatabaseName           string `json:"databaseName"`
+	Active                 bool   `json:"active"`
+	Readonly               bool   `json:"readonly"`
+	MaxOpenConns           int    `json:"maxOpenConns"`
+	MinIdleConns           int    `json:"minIdleConns"`
+	MaxTxConns             int    `json:"maxTxConns"`
+	DefaultTxTimeoutSec    int    `json:"-"`
+	DefaultQueryTimeoutSec int    `json:"-"`
 
 	OpenConns    int          `json:"openConns"`
 	IdleConns    int          `json:"idleConns"`
@@ -46,7 +49,8 @@ const (
 type NodeInfo struct {
 	NodeID     string       `json:"nodeId"`
 	Status     NodeStatus   `json:"status"`
-	BaseURL    string       `json:"baseUrl"`
+	BaseURL    string       `json:"-"`
+	SecretKey  string       `json:"-"`
 	HealthInfo HealthInfo   `json:"healthInfo"`
 	Mu         sync.RWMutex `json:"-"`
 }
@@ -61,9 +65,10 @@ func (node *NodeInfo) Clone() NodeInfo {
 	copy(datasources, node.HealthInfo.Datasources)
 
 	return NodeInfo{
-		NodeID:  node.NodeID,
-		Status:  node.Status,
-		BaseURL: node.BaseURL,
+		NodeID:    node.NodeID,
+		Status:    node.Status,
+		BaseURL:   node.BaseURL,
+		SecretKey: node.SecretKey,
 		HealthInfo: HealthInfo{
 			MaxHttpSessions: node.HealthInfo.MaxHttpSessions,
 			RunningHttp:     node.HealthInfo.RunningHttp,
