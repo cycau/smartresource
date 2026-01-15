@@ -88,20 +88,20 @@ func (r *Router) CollectHealth() {
 	}
 
 	selfNode := r.balancer.SelfNode
+	selfNode.Mu.Lock()
+	defer selfNode.Mu.Unlock()
 
 	for i := range selfNode.HealthInfo.Datasources {
-		ds := &selfNode.HealthInfo.Datasources[i]
-		ds.Mu.Lock()
-		defer ds.Mu.Unlock()
-
 		openConns, idleConns, runningTx := r.txManager.Statistics(i)
+
+		ds := &selfNode.HealthInfo.Datasources[i]
+		//ds.Mu.Lock()
 		ds.OpenConns = openConns
 		ds.IdleConns = idleConns
 		ds.RunningTx = runningTx
+		//ds.Mu.Unlock()
 	}
 
-	selfNode.Mu.Lock()
-	defer selfNode.Mu.Unlock()
 	selfNode.HealthInfo.CheckTime = time.Now()
 }
 
@@ -114,12 +114,12 @@ func (r *Router) setupRoutes() {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(nodeInfo)
+			json.NewEncoder(w).Encode(nodeInfo.Clone())
 		}
 	}(r.balancer.SelfNode).ServeHTTP)
 
 	// API v1 routes
-	r.Route("/v1/rdb", func(router chi.Router) {
+	r.Route("/rdb", func(router chi.Router) {
 		// Execute endpoint
 		execHandler := rdb.NewExecHandler(r.balancer.SelfNode, r.txManager)
 		router.Post("/query", execHandler.Query)
