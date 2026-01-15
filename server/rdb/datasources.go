@@ -12,25 +12,27 @@ import (
 
 // DatasourceConfig represents configuration for a single datasource
 type Config struct {
-	DatasourceID                 string
-	DatabaseName                 string
-	Driver                       string
-	DSN                          string
-	MaxOpenConns                 int
-	MinIdleConns                 int
-	MaxTransactionConns          int
-	ConnMaxLifetimeSeconds       int
-	DefaultExecuteTimeoutSeconds int
-	Readonly                     bool
+	DatasourceID           string
+	DatabaseName           string
+	Driver                 string
+	DSN                    string
+	MaxOpenConns           int
+	MinIdleConns           int
+	MaxTransactionConns    int
+	ConnMaxLifetimeSeconds int
+	DefaultTxTimeoutSec    int
+	DefaultQueryTimeoutSec int
+	Readonly               bool
 }
 
 type Datasource struct {
-	DatasourceID                 string
-	DatabaseName                 string
-	Driver                       string
-	DefaultExecuteTimeoutSeconds int
-	DB                           *sql.DB
-	Readonly                     bool
+	DatasourceID           string
+	DatabaseName           string
+	Driver                 string
+	DefaultTxTimeoutSec    int
+	DefaultQueryTimeoutSec int
+	DB                     *sql.DB
+	Readonly               bool
 }
 
 // Datasources holds a map of datasource ID to *sql.DB
@@ -42,7 +44,7 @@ type Datasources struct {
 // Initialize initializes datasources from configuration
 func Initialize(configs []Config) (*Datasources, error) {
 	d := &Datasources{
-		dss:     make([]*Datasource, 0, len(configs)),
+		dss:     make([]*Datasource, len(configs)),
 		dsIdMap: make(map[string]uint16, len(configs)),
 	}
 
@@ -77,12 +79,13 @@ func Initialize(configs []Config) (*Datasources, error) {
 		}
 
 		d.dss[i] = &Datasource{
-			DatasourceID:                 cfg.DatasourceID,
-			DatabaseName:                 cfg.DatabaseName,
-			Driver:                       driverName,
-			DefaultExecuteTimeoutSeconds: cfg.DefaultExecuteTimeoutSeconds,
-			DB:                           db,
-			Readonly:                     cfg.Readonly,
+			DatasourceID:           cfg.DatasourceID,
+			DatabaseName:           cfg.DatabaseName,
+			Driver:                 driverName,
+			DefaultTxTimeoutSec:    cfg.DefaultTxTimeoutSec,
+			DefaultQueryTimeoutSec: cfg.DefaultQueryTimeoutSec,
+			DB:                     db,
+			Readonly:               cfg.Readonly,
 		}
 	}
 
