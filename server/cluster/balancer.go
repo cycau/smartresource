@@ -51,6 +51,25 @@ func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
  *****************************/
 func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/healz") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		secretKey := r.Header.Get("X-Secret-Key")
+		if secretKey != b.SelfNode.SecretKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		endpoint, tarTbName, txId := parseRequest(r)
+
+		// 対象外のパスはそのまま処理
+		if endpoint == EP_Other {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// RunningHttp count
 		b.SelfNode.Mu.Lock()
 		b.SelfNode.HealthInfo.RunningHttp++
@@ -66,16 +85,8 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			b.SelfNode.Mu.Unlock()
 		}()
 
-		endpoint, tarTbName, txId := parseRequest(r)
-
-		// 対象外のパスはそのまま処理
-		if endpoint == EP_Other {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// トランザクション処理は常に受け入れる
-		if txId != nil {
+		if txId != nil && *txId != "" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -88,7 +99,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		selfBestScore, recommendedDatasource := selectSelfDatasource(&selfNode, tarTbName, endpoint)
 		if recommendedDatasource != nil {
 			// add to context
-			ctx := context.WithValue(r.Context(), "DS_IDX", recommendedDatasource.index)
+			ctx := context.WithValue(r.Context(), "$S_IDX", recommendedDatasource.index)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -146,7 +157,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		if randomNodeScore == nil {
 			// 自分にはまだ捌ける余地がある場合は自分で処理
 			if selfBestScore.score > 0 {
-				ctx := context.WithValue(r.Context(), "DS_IDX", selfBestScore.index)
+				ctx := context.WithValue(r.Context(), "$S_IDX", selfBestScore.index)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -157,7 +168,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// 自分のScoreの方が高い場合は自分で処理
 		if selfBestScore.score > randomNodeScore.score {
 			// さらに他ノードBestScoreとの比較はやめる、一瞬他ノードに集中させてしまう恐れあり
-			ctx := context.WithValue(r.Context(), "DS_IDX", selfBestScore.index)
+			ctx := context.WithValue(r.Context(), "$S_IDX", selfBestScore.index)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -313,7 +324,10 @@ func calculateMetrics(node *NodeInfo, dsIdx int) normalizedMetrics {
 
 	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpSessions)
 	dbUsage := float64(dsInfo.OpenConns) / float64(dsInfo.MaxOpenConns)
-	txUsage := float64(dsInfo.RunningTx) / float64(dsInfo.MaxTxConns)
+	txUsage := 1.0
+	if dsInfo.MaxTxConns > 0 {
+		txUsage = float64(dsInfo.RunningTx) / float64(dsInfo.MaxTxConns)
+	}
 
 	httpFree := 1 - clamp01(httpUsage)
 	dbFree := 1 - clamp01(dbUsage)
