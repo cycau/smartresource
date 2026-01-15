@@ -68,19 +68,19 @@ func NewTxManager(datasources *Datasources, txIDGen *TxIDGenerator) *TxManager {
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(reqCtx context.Context, nodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, executeTimeoutMs *int) (*TxEntry, error) {
+func (tm *TxManager) Begin(nodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec int) (*TxEntry, error) {
 	// Get database connection
 	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
 		return nil, fmt.Errorf("datasource not found: %s", ds.DatasourceID)
 	}
 
-	timeout := time.Duration(ds.DefaultExecuteTimeoutSeconds) * time.Second
-	if executeTimeoutMs != nil && *executeTimeoutMs > 0 {
-		timeout = time.Duration(*executeTimeoutMs)
+	timeout := time.Duration(ds.DefaultTxTimeoutSec) * time.Second
+	if timeoutSec > 0 {
+		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	expiresAt := time.Now().Add(timeout)
-	ctx, cancel := context.WithTimeout(reqCtx, timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	conn, err := ds.DB.Conn(ctx)
@@ -125,13 +125,13 @@ func (tm *TxManager) Begin(reqCtx context.Context, nodeIndex int, datasourceIdx 
 }
 
 // Get retrieves a transaction entry and touches it
-func (tm *TxManager) Get(txID string) (*TxEntry, error) {
+func (tm *TxManager) Get(txID string) (dsIdx uint16, entry *TxEntry, err error) {
 	tm.mu.RLock()
 	entry, ok := tm.entries[txID]
 	tm.mu.RUnlock()
 
 	if !ok {
-		return nil, ErrTxNotFound
+		return 0, nil, ErrTxNotFound
 	}
 
 	// Check if expired
@@ -145,13 +145,17 @@ func (tm *TxManager) Get(txID string) (*TxEntry, error) {
 			entry.Tx.Rollback()
 			entry.Conn.Close()
 		}()
-		return nil, ErrTxExpired
+		return 0, nil, ErrTxExpired
 	}
 
 	// Touch to extend expiration
 	entry.Touch(time.Until(entry.ExpiresAt))
 
-	return entry, nil
+	txInfo, err := tm.txIDGen.VerifyAndParse(txID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to verify and parse txID: %w", err)
+	}
+	return txInfo.DsIndex, entry, nil
 }
 
 // Commit commits a transaction
@@ -207,7 +211,7 @@ func (tm *TxManager) Rollback(txID string) error {
 }
 
 // QueryContext queries the database
-func (tm *TxManager) QueryContext(ctx context.Context, datasourceIdx int, sql string, args ...interface{}) (*sql.Rows, error) {
+func (tm *TxManager) Query(ctx context.Context, datasourceIdx int, sql string, args ...any) (*sql.Rows, error) {
 	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
@@ -215,13 +219,40 @@ func (tm *TxManager) QueryContext(ctx context.Context, datasourceIdx int, sql st
 	return ds.DB.QueryContext(ctx, sql, args...)
 }
 
+// QueryContext queries the database
+func (tm *TxManager) QueryTx(ctx context.Context, timoutSec int, txId string, sql string, args ...any) (*sql.Rows, error) {
+	_, entry, err := tm.Get(txId)
+	if err != nil {
+		if err == ErrTxNotFound || err == ErrTxExpired {
+			return nil, fmt.Errorf("Transaction not found or expired: %v", err)
+		}
+		return nil, fmt.Errorf("Failed to get transaction: %v", err)
+	}
+
+	return entry.Tx.QueryContext(ctx, sql, args...)
+}
+
 // ExecContext executes the database
-func (tm *TxManager) ExecContext(ctx context.Context, datasourceIdx int, sql string, args ...interface{}) (sql.Result, error) {
+func (tm *TxManager) Exec(ctx context.Context, datasourceIdx int, sql string, args ...any) (sql.Result, error) {
 	ds, ok := tm.datasources.Get(datasourceIdx)
 	if !ok {
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
 	return ds.DB.ExecContext(ctx, sql, args...)
+}
+
+// ExecContext executes the database
+func (tm *TxManager) ExecTx(ctx context.Context, timoutSec int, txId string, sql string, args ...any) (sql.Result, error) {
+	// Get transaction entry
+	_, entry, err := tm.Get(txId)
+	if err != nil {
+		if err == ErrTxNotFound || err == ErrTxExpired {
+			return nil, fmt.Errorf("Transaction not found or expired: %v", err)
+		}
+		return nil, fmt.Errorf("Failed to get transaction: %v", err)
+	}
+
+	return entry.Tx.ExecContext(ctx, sql, args...)
 }
 
 func (tm *TxManager) Statistics(datasourceIdx int) (int, int, int) {
