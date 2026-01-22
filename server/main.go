@@ -32,17 +32,17 @@ type ClusterNodeConfig struct {
 }
 
 type DatasourceConfig struct {
-	DatasourceID            string `yaml:"datasourceId"`
-	DatabaseName            string `yaml:"databaseName"`
-	Driver                  string `yaml:"driver"`
-	DSN                     string `yaml:"dsn"`
-	MaxOpenConns            int    `yaml:"maxOpenConns"`
-	MinIdleConns            int    `yaml:"minIdleConns"`
-	MaxTransactionConns     int    `yaml:"maxTransactionConns"`
-	ConnMaxLifetimeSec      int    `yaml:"connMaxLifetimeSec"`
-	DefaultQueryTimeoutSec  int    `yaml:"defaultQueryTimeoutSec"`
-	DefaultTxIdleTimeoutSec int    `yaml:"defaultTxIdleTimeoutSec"`
-	Readonly                bool   `yaml:"readonly"`
+	DatasourceID           string `yaml:"datasourceId"`
+	DatabaseName           string `yaml:"databaseName"`
+	Driver                 string `yaml:"driver"`
+	DSN                    string `yaml:"dsn"`
+	MaxOpenConns           int    `yaml:"maxOpenConns"`
+	MinIdleConns           int    `yaml:"minIdleConns"`
+	MaxConnLifetimeSec     int    `yaml:"maxConnLifetimeSec"`
+	MaxTxConns             int    `yaml:"maxTxConns"`
+	MaxTxIdleTimeoutSec    int    `yaml:"maxTxIdleTimeoutSec"`
+	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
+	Readonly               bool   `yaml:"readonly"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -77,17 +77,17 @@ func main() {
 	hzDatasources := make([]cluster.DatasourceInfo, len(config.Datasources))
 	for i, ds := range config.Datasources {
 		dsConfigs[i] = rdb.Config{
-			DatasourceID:            ds.DatasourceID,
-			DatabaseName:            ds.DatabaseName,
-			Driver:                  ds.Driver,
-			DSN:                     ds.DSN,
-			MaxOpenConns:            ds.MaxOpenConns,
-			MinIdleConns:            ds.MinIdleConns,
-			MaxTransactionConns:     ds.MaxTransactionConns,
-			ConnMaxLifetimeSec:      ds.ConnMaxLifetimeSec,
-			DefaultQueryTimeoutSec:  ds.DefaultQueryTimeoutSec,
-			DefaultTxIdleTimeoutSec: ds.DefaultTxIdleTimeoutSec,
-			Readonly:                ds.Readonly,
+			DatasourceID:           ds.DatasourceID,
+			DatabaseName:           ds.DatabaseName,
+			Driver:                 ds.Driver,
+			DSN:                    ds.DSN,
+			MaxOpenConns:           ds.MaxOpenConns,
+			MinIdleConns:           ds.MinIdleConns,
+			MaxConnLifetimeSec:     ds.MaxConnLifetimeSec,
+			MaxTxConns:             ds.MaxTxConns,
+			DefaultQueryTimeoutSec: ds.DefaultQueryTimeoutSec,
+			MaxTxIdleTimeoutSec:    ds.MaxTxIdleTimeoutSec,
+			Readonly:               ds.Readonly,
 		}
 
 		hzDatasources[i] = cluster.DatasourceInfo{
@@ -97,7 +97,7 @@ func main() {
 			Readonly:     ds.Readonly,
 			MaxOpenConns: ds.MaxOpenConns,
 			MinIdleConns: ds.MinIdleConns,
-			MaxTxConns:   ds.MaxTransactionConns,
+			MaxTxConns:   ds.MaxTxConns,
 		}
 	}
 

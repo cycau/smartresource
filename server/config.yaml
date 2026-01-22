@@ -10,21 +10,21 @@ datasources:
     dsn: "postgres://user:password@localhost:25432/incident_manager"
     maxOpenConns: 100
     minIdleConns: 10
-    maxTransactionConns: 5
-    connMaxLifetimeSec: 1800
+    maxConnLifetimeSec: 1800
+    maxTxConns: 5
+    maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
-    defaultTxIdleTimeoutSec: 15
     readonly: false
   - datasourceId: pg_slave01
     databaseName: crm-system
     driver: postgres
     dsn: "postgres://user:password@localhost:25432/incident_manager"
-    maxOpenConns: 50
-    minIdleConns: 5
-    maxTransactionConns: 0
-    connMaxLifetimeSec: 1800
+    maxOpenConns: 100
+    minIdleConns: 10
+    maxConnLifetimeSec: 1800
+    maxTxConns: 5
+    maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
-    defaultTxIdleTimeoutSec: 15
     readonly: true
 
 cluster:

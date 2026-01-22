@@ -94,11 +94,13 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	defer exec.statisticsRequest(dsIDX, -1)
 
 	var rows *sql.Rows
+	var cancel context.CancelFunc
 	var queryErr error
 
 	if req.TxID == nil {
 		// Execute query without transaction
-		rows, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		rows, cancel, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		defer cancel()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -112,7 +114,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 	} else {
 		// Execute query in transaction
-		rows, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		rows, cancel, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		defer cancel()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -244,11 +247,12 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	defer exec.statisticsRequest(dsIDX, -1)
 
 	var result sql.Result
+	var cancel context.CancelFunc
 	var execErr error
-
 	if req.TxID == nil {
 		// Get database
-		result, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		result, cancel, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		defer cancel()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -261,7 +265,8 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Execute in transaction
-		result, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		result, cancel, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		defer cancel()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
