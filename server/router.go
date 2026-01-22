@@ -92,7 +92,7 @@ func (r *Router) CollectHealth() {
 	defer selfNode.Mu.Unlock()
 
 	for i := range selfNode.HealthInfo.Datasources {
-		openConns, idleConns, runningTx := r.txManager.Statistics(i)
+		_, openConns, idleConns, runningTx := r.txManager.Statistics(i)
 
 		ds := &selfNode.HealthInfo.Datasources[i]
 		//ds.Mu.Lock()

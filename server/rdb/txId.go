@@ -26,7 +26,7 @@ var (
 
 // TxInfo contains decoded transaction ID information
 type TxInfo struct {
-	DsIndex  uint16
+	DsIndex  int
 	IssuedAt time.Time
 }
 
@@ -109,7 +109,7 @@ func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
 	issuedAt := time.UnixMilli(int64(issuedAtMs))
 
 	return &TxInfo{
-		DsIndex:  dsIndex,
+		DsIndex:  int(dsIndex),
 		IssuedAt: issuedAt,
 	}, nil
 }

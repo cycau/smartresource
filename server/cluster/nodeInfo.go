@@ -6,34 +6,33 @@ import (
 )
 
 type DatasourceInfo struct {
-	DatasourceID           string `json:"datasourceId"`
-	DatabaseName           string `json:"databaseName"`
-	Active                 bool   `json:"active"`
-	Readonly               bool   `json:"readonly"`
-	MaxOpenConns           int    `json:"maxOpenConns"`
-	MinIdleConns           int    `json:"minIdleConns"`
-	MaxTxConns             int    `json:"maxTxConns"`
-	DefaultTxTimeoutSec    int    `json:"-"`
-	DefaultQueryTimeoutSec int    `json:"-"`
+	DatasourceID            string `json:"datasourceId"`
+	DatabaseName            string `json:"databaseName"`
+	Active                  bool   `json:"active"`
+	Readonly                bool   `json:"readonly"`
+	MaxOpenConns            int    `json:"maxOpenConns"`
+	MinIdleConns            int    `json:"minIdleConns"`
+	MaxTxConns              int    `json:"maxTxConns"`
+	DefaultQueryTimeoutSec  int    `json:"-"`
+	DefaultTxIdleTimeoutSec int    `json:"-"`
 
-	OpenConns    int          `json:"openConns"`
-	IdleConns    int          `json:"idleConns"`
-	WaitConns    int          `json:"waitConns"`
-	RunningSql   int          `json:"runningSql"`
-	RunningTx    int          `json:"runningTx"`
-	ErrorRate1m  float64      `json:"errorRate1m"`
-	Timeouts1m   int          `json:"timeouts1m"`
-	LatencyMs    int          `json:"latencyMs"`
-	LatencyP95Ms int          `json:"latencyP95Ms"`
-	Mu           sync.RWMutex `json:"-"`
+	OpenConns    int     `json:"openConns"`
+	IdleConns    int     `json:"idleConns"`
+	WaitConns    int     `json:"waitConns"`
+	RunningSql   int     `json:"runningSql"`
+	RunningTx    int     `json:"runningTx"`
+	ErrorRate1m  float64 `json:"errorRate1m"`
+	Timeouts1m   int     `json:"timeouts1m"`
+	LatencyMs    int     `json:"latencyMs"`
+	LatencyP95Ms int     `json:"latencyP95Ms"`
 }
 
 type HealthInfo struct {
 	MaxHttpSessions int              `json:"maxHttpSessions"`
 	RunningHttp     int              `json:"runningHttp"`
-	Datasources     []DatasourceInfo `json:"datasources"`
 	UpTime          time.Time        `json:"upTime"`
 	CheckTime       time.Time        `json:"checkTime"`
+	Datasources     []DatasourceInfo `json:"datasources"`
 }
 
 type NodeStatus string
@@ -56,7 +55,6 @@ type NodeInfo struct {
 }
 
 // 必要の場合はatomic.Pointerでラップして使うこと
-
 func (node *NodeInfo) Clone() NodeInfo {
 	node.Mu.RLock()
 	defer node.Mu.RUnlock()
@@ -67,14 +65,14 @@ func (node *NodeInfo) Clone() NodeInfo {
 	return NodeInfo{
 		NodeID:    node.NodeID,
 		Status:    node.Status,
-		BaseURL:   node.BaseURL,
-		SecretKey: node.SecretKey,
+		BaseURL:   "-",
+		SecretKey: "-",
 		HealthInfo: HealthInfo{
 			MaxHttpSessions: node.HealthInfo.MaxHttpSessions,
 			RunningHttp:     node.HealthInfo.RunningHttp,
 			UpTime:          node.HealthInfo.UpTime,
-			Datasources:     datasources,
 			CheckTime:       node.HealthInfo.CheckTime,
+			Datasources:     datasources,
 		},
 	}
 }

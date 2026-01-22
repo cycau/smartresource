@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"smartdatastream/server/cluster"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -43,26 +42,21 @@ const (
 
 // ParamValue represents a parameter value
 type ParamValue struct {
-	Type  ValueType   `json:"type"`
-	Value interface{} `json:"value,omitempty"`
+	Type  ValueType `json:"type"`
+	Value any       `json:"value,omitempty"`
 }
 
 // ExecuteResponse represents the response for /v1/rdb/execute
 type QueryResponse struct {
-	Meta ResultMeta               `json:"meta"`
-	Rows []map[string]interface{} `json:"rows"`
+	ColumnMeta      []ColumnMeta `json:"columnMeta,omitempty"`
+	Rows            []any        `json:"rows"`
+	TotalCount      int          `json:"totalCount"`
+	ExecutionTimeMs int64        `json:"executionTimeMs"`
 }
 
 type ExecuteResponse struct {
 	EffectedRows    int64 `json:"effectedRows"`
 	ExecutionTimeMs int64 `json:"executionTimeMs"`
-}
-
-// ResultMeta contains metadata about the query result
-type ResultMeta struct {
-	TotalCount      int          `json:"totalCount"`
-	Columns         []ColumnMeta `json:"columns,omitempty"`
-	ExecutionTimeMs int64        `json:"executionTimeMs"`
 }
 
 // ColumnMeta contains metadata about a column
@@ -76,7 +70,6 @@ type ColumnMeta struct {
 type ExecHandler struct {
 	selfNode  *cluster.NodeInfo
 	txManager *TxManager
-	mu        sync.RWMutex
 }
 
 // NewExecuteHandler creates a new ExecuteHandler
@@ -84,13 +77,13 @@ func NewExecHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *ExecHandl
 	return &ExecHandler{
 		selfNode:  nodeInfo,
 		txManager: txManager,
-		mu:        sync.RWMutex{},
 	}
 }
 
 func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	dsIDX, req, args, err := exec.parseRequest(r)
+
+	dsIDX, req, parameters, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
@@ -105,7 +98,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 
 	if req.TxID == nil {
 		// Execute query without transaction
-		rows, queryErr = exec.txManager.Query(r.Context(), dsIDX, req.SQL, args...)
+		rows, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -119,7 +112,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 	} else {
 		// Execute query in transaction
-		rows, queryErr = exec.txManager.QueryTx(r.Context(), *req.TimeoutSec, *req.TxID, req.SQL, args...)
+		rows, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -158,7 +151,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read rows
-	var resultRows []map[string]interface{}
+	var resultRows []any
 	limit := 1000
 	if req.LimitRows != nil && *req.LimitRows > 0 {
 		limit = *req.LimitRows
@@ -171,8 +164,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Create slice for scanning
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
+		values := make([]any, len(columns))
+		valuePtrs := make([]any, len(columns))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
@@ -182,14 +175,24 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Convert row to map
-		rowMap := make(map[string]interface{})
-		for i, col := range columns {
-			val := values[i]
-			rowMap[col] = convertValue(val)
+		for i, val := range values {
+			if val == nil {
+				continue
+			}
+
+			switch v := val.(type) {
+			case []byte:
+				values[i] = base64.StdEncoding.EncodeToString(v)
+			case time.Time:
+				values[i] = v.Format(time.RFC3339)
+			case decimal.Decimal:
+				values[i] = v.String()
+			default:
+				// Return the value as-is to let JSON encoder handle it
+			}
 		}
 
-		resultRows = append(resultRows, rowMap)
+		resultRows = append(resultRows, values)
 		rowCount++
 	}
 
@@ -216,12 +219,10 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 
 	// Write response
 	response := QueryResponse{
-		Meta: ResultMeta{
-			TotalCount:      rowCount,
-			Columns:         columnMeta,
-			ExecutionTimeMs: executionTimeMs,
-		},
-		Rows: resultRows,
+		ColumnMeta:      columnMeta,
+		Rows:            resultRows,
+		TotalCount:      rowCount,
+		ExecutionTimeMs: executionTimeMs,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -231,7 +232,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 
 func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	dsIDX, req, args, err := exec.parseRequest(r)
+
+	dsIDX, req, parameters, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
@@ -246,7 +248,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	if req.TxID == nil {
 		// Get database
-		result, execErr = exec.txManager.Exec(r.Context(), dsIDX, req.SQL, args...)
+		result, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -259,7 +261,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Execute in transaction
-		result, execErr = exec.txManager.ExecTx(r.Context(), *req.TimeoutSec, *req.TxID, req.SQL, args...)
+		result, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -298,14 +300,14 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 
 // updateRunningSql updates the RunningSql count for a datasource
 func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
-	// Find or create datasource info
+	exec.selfNode.Mu.Lock()
+	defer exec.selfNode.Mu.Unlock()
+
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
-	dsInfo.Mu.Lock()
 	dsInfo.RunningSql += delta
 	if dsInfo.RunningSql < 0 {
 		dsInfo.RunningSql = 0
 	}
-	dsInfo.Mu.Unlock()
 }
 
 func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
@@ -313,8 +315,8 @@ func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, is
 	// This prevents potential deadlock if TxManager ever needs to call SqlHandler methods
 
 	// Now acquire SqlHandler lock to update shared state
-	exec.mu.Lock()
-	defer exec.mu.Unlock()
+	exec.selfNode.Mu.Lock()
+	defer exec.selfNode.Mu.Unlock()
 
 	// Find or create datasource info
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
@@ -348,7 +350,7 @@ Body:
 		"limitRows": 1000
 	}
 */
-func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []interface{}, error) {
+func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []any, error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to parse request: %w", err)
@@ -361,12 +363,12 @@ func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []i
 	}
 
 	// Convert params
-	args, err := convertParams(req.Params)
+	parameters, err := convertParams(req.Params)
 	if err != nil {
 		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to convert params: %w", err)
 	}
 
-	return dsIDX, req, args, nil
+	return dsIDX, req, parameters, nil
 }
 
 /************************************************************
@@ -491,26 +493,6 @@ func convertParam(p ParamValue) (any, error) {
 		return nil, fmt.Errorf("invalid timestamp_rfc3339 value: %v", p.Value)
 	default:
 		return nil, fmt.Errorf("unknown param type: %s", p.Type)
-	}
-}
-
-func convertValue(val any) any {
-	if val == nil {
-		return nil
-	}
-
-	switch v := val.(type) {
-	case []byte:
-		return base64.StdEncoding.EncodeToString(v)
-	case time.Time:
-		return v.Format(time.RFC3339)
-	case decimal.Decimal:
-		return v.String()
-	case int64, int32, int, float64, bool, string:
-		return v
-	default:
-		// Return the value as-is to let JSON encoder handle it
-		return v
 	}
 }
 

@@ -32,17 +32,17 @@ type ClusterNodeConfig struct {
 }
 
 type DatasourceConfig struct {
-	DatasourceID           string `yaml:"datasourceId"`
-	DatabaseName           string `yaml:"databaseName"`
-	Driver                 string `yaml:"driver"`
-	DSN                    string `yaml:"dsn"`
-	MaxOpenConns           int    `yaml:"maxOpenConns"`
-	MinIdleConns           int    `yaml:"minIdleConns"`
-	MaxTransactionConns    int    `yaml:"maxTransactionConns"`
-	ConnMaxLifetimeSeconds int    `yaml:"connMaxLifetimeSeconds"`
-	DefaultTxTimeoutSec    int    `yaml:"defaultTxTimeoutSec"`
-	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
-	Readonly               bool   `yaml:"readonly"`
+	DatasourceID            string `yaml:"datasourceId"`
+	DatabaseName            string `yaml:"databaseName"`
+	Driver                  string `yaml:"driver"`
+	DSN                     string `yaml:"dsn"`
+	MaxOpenConns            int    `yaml:"maxOpenConns"`
+	MinIdleConns            int    `yaml:"minIdleConns"`
+	MaxTransactionConns     int    `yaml:"maxTransactionConns"`
+	ConnMaxLifetimeSec      int    `yaml:"connMaxLifetimeSec"`
+	DefaultQueryTimeoutSec  int    `yaml:"defaultQueryTimeoutSec"`
+	DefaultTxIdleTimeoutSec int    `yaml:"defaultTxIdleTimeoutSec"`
+	Readonly                bool   `yaml:"readonly"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -77,17 +77,17 @@ func main() {
 	hzDatasources := make([]cluster.DatasourceInfo, len(config.Datasources))
 	for i, ds := range config.Datasources {
 		dsConfigs[i] = rdb.Config{
-			DatasourceID:           ds.DatasourceID,
-			DatabaseName:           ds.DatabaseName,
-			Driver:                 ds.Driver,
-			DSN:                    ds.DSN,
-			MaxOpenConns:           ds.MaxOpenConns,
-			MinIdleConns:           ds.MinIdleConns,
-			MaxTransactionConns:    ds.MaxTransactionConns,
-			ConnMaxLifetimeSeconds: ds.ConnMaxLifetimeSeconds,
-			DefaultTxTimeoutSec:    ds.DefaultTxTimeoutSec,
-			DefaultQueryTimeoutSec: ds.DefaultQueryTimeoutSec,
-			Readonly:               ds.Readonly,
+			DatasourceID:            ds.DatasourceID,
+			DatabaseName:            ds.DatabaseName,
+			Driver:                  ds.Driver,
+			DSN:                     ds.DSN,
+			MaxOpenConns:            ds.MaxOpenConns,
+			MinIdleConns:            ds.MinIdleConns,
+			MaxTransactionConns:     ds.MaxTransactionConns,
+			ConnMaxLifetimeSec:      ds.ConnMaxLifetimeSec,
+			DefaultQueryTimeoutSec:  ds.DefaultQueryTimeoutSec,
+			DefaultTxIdleTimeoutSec: ds.DefaultTxIdleTimeoutSec,
+			Readonly:                ds.Readonly,
 		}
 
 		hzDatasources[i] = cluster.DatasourceInfo{
@@ -100,22 +100,14 @@ func main() {
 			MaxTxConns:   ds.MaxTransactionConns,
 		}
 	}
-	datasources, err := rdb.Initialize(dsConfigs)
-	if err != nil {
-		log.Fatalf("Failed to initialize datasources: %v", err)
-	}
-	log.Printf("Initialized %d datasource(s)", len(config.Datasources))
-
-	// Initialize TxIDGenerator
-	txIDGen := rdb.NewTxIDGenerator()
 
 	// Initialize TxManager
-	txManager := rdb.NewTxManager(datasources, txIDGen)
+	txManager := rdb.NewTxManager(dsConfigs)
 
 	// Set maxHttpSessions for HTTP connection limiting
 	maxHttpSessions := config.MaxHttpSessions
 	if maxHttpSessions <= 0 {
-		maxHttpSessions = 100 // default
+		maxHttpSessions = 1000 // default
 	}
 	log.Printf("HTTP connection limit: %d", maxHttpSessions)
 
@@ -182,6 +174,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+	selfNode.Mu.Lock()
+	selfNode.Status = cluster.STOPPING
+	selfNode.Mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -192,11 +187,6 @@ func main() {
 
 	// Shutdown TxManager
 	txManager.Shutdown()
-
-	// Close datasources
-	if err := datasources.CloseAll(); err != nil {
-		log.Printf("Error closing datasources: %v", err)
-	}
 
 	log.Println("Server exited")
 }

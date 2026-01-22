@@ -12,8 +12,8 @@ datasources:
     minIdleConns: 10
     maxTransactionConns: 5
     connMaxLifetimeSec: 1800
-    defaultTxTimeoutSec: 300
     defaultQueryTimeoutSec: 30
+    defaultTxIdleTimeoutSec: 15
     readonly: false
   - datasourceId: pg_slave01
     databaseName: crm-system
@@ -23,8 +23,8 @@ datasources:
     minIdleConns: 5
     maxTransactionConns: 0
     connMaxLifetimeSec: 1800
-    defaultTxTimeoutSec: 300
     defaultQueryTimeoutSec: 30
+    defaultTxIdleTimeoutSec: 15
     readonly: true
 
 cluster:

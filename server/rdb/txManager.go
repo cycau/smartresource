@@ -16,47 +16,60 @@ var (
 
 // TxEntry represents a transaction entry
 type TxEntry struct {
-	TxID      string
-	DsIdx     int
-	Conn      *sql.Conn
-	Tx        *sql.Tx
-	ExpiresAt time.Time
-	LastTouch time.Time
-	mu        sync.RWMutex
+	TxID           string
+	dsIdx          int
+	idleTimeoutSec int
+	ExpiresAt      time.Time
+	Conn           *sql.Conn
+	Tx             *sql.Tx
 }
 
 // Touch updates the expiration time and last touch time
-func (e *TxEntry) Touch(ttl time.Duration) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	now := time.Now()
-	e.ExpiresAt = now.Add(ttl)
-	e.LastTouch = now
+func (e *TxEntry) touch() {
+	e.ExpiresAt = time.Now().Add(time.Duration(e.idleTimeoutSec) * time.Second)
 }
 
-// IsExpired checks if the transaction is expired
-func (e *TxEntry) IsExpired() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return time.Now().After(e.ExpiresAt)
+type TxDatasource struct {
+	ds      *Datasource
+	entries map[string]*TxEntry
+	mu      sync.RWMutex
 }
 
 // TxManager manages transactions
 type TxManager struct {
-	datasources *Datasources
+	tars        []*TxDatasource
 	txIDGen     *TxIDGenerator
-	entries     map[string]*TxEntry
 	stopCleanup chan struct{}
-	mu          sync.RWMutex
 	wg          sync.WaitGroup
 }
 
+func (tx *TxManager) close(entry *TxEntry) {
+	tar := tx.tars[entry.dsIdx]
+	tar.mu.Lock()
+	defer tar.mu.Unlock()
+
+	entry.Conn.Close()
+	delete(tar.entries, entry.TxID)
+}
+
 // NewTxManager creates a new TxManager
-func NewTxManager(datasources *Datasources, txIDGen *TxIDGenerator) *TxManager {
+func NewTxManager(configs []Config) *TxManager {
+	tars := make([]*TxDatasource, len(configs))
+
+	for i, cfg := range configs {
+		ds, err := NewDatasource(cfg)
+		if err != nil {
+			panic(fmt.Sprintf("failed to initialize datasource %s: %v", cfg.DatasourceID, err))
+		}
+
+		tars[i] = &TxDatasource{
+			ds:      ds,
+			entries: make(map[string]*TxEntry),
+		}
+	}
 	tm := &TxManager{
-		datasources: datasources,
-		txIDGen:     txIDGen,
-		entries:     make(map[string]*TxEntry),
+		tars:        tars,
+		txIDGen:     NewTxIDGenerator(),
 		stopCleanup: make(chan struct{}),
 	}
 
@@ -68,22 +81,21 @@ func NewTxManager(datasources *Datasources, txIDGen *TxIDGenerator) *TxManager {
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(nodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec int) (*TxEntry, error) {
+func (tm *TxManager) Begin(clientNodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
 	// Get database connection
-	ds, ok := tm.datasources.Get(datasourceIdx)
-	if !ok {
-		return nil, fmt.Errorf("datasource not found: %s", ds.DatasourceID)
+	tar := tm.tars[datasourceIdx]
+	if tar == nil {
+		return nil, fmt.Errorf("datasource not found: %s", tar.ds.DatasourceID)
 	}
 
-	timeout := time.Duration(ds.DefaultTxTimeoutSec) * time.Second
-	if timeoutSec > 0 {
-		timeout = time.Duration(timeoutSec) * time.Second
+	timeout := time.Duration(tar.ds.DefaultTxIdleTimeoutSec) * time.Second
+	if timeoutSec != nil {
+		timeout = time.Duration(*timeoutSec) * time.Second
 	}
-	expiresAt := time.Now().Add(timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	conn, err := ds.DB.Conn(ctx)
+	conn, err := tar.ds.DB.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -98,7 +110,7 @@ func (tm *TxManager) Begin(nodeIndex int, datasourceIdx int, isolationLevel sql.
 	}
 
 	// Generate transaction ID
-	txID, err := tm.txIDGen.Generate(nodeIndex, datasourceIdx)
+	txID, err := tm.txIDGen.Generate(clientNodeIndex, datasourceIdx)
 	if err != nil {
 		tx.Rollback()
 		conn.Close()
@@ -106,76 +118,67 @@ func (tm *TxManager) Begin(nodeIndex int, datasourceIdx int, isolationLevel sql.
 	}
 
 	// Create entry
-	now := time.Now()
 	entry := &TxEntry{
-		TxID:      txID,
-		DsIdx:     datasourceIdx,
-		Conn:      conn,
-		Tx:        tx,
-		ExpiresAt: expiresAt,
-		LastTouch: now,
+		TxID:           txID,
+		dsIdx:          datasourceIdx,
+		idleTimeoutSec: int(timeout.Seconds()),
+		ExpiresAt:      time.Now().Add(timeout),
+		Conn:           conn,
+		Tx:             tx,
 	}
 
 	// Register entry
-	tm.mu.Lock()
-	tm.entries[txID] = entry
-	tm.mu.Unlock()
+	tar.mu.Lock()
+	tar.entries[txID] = entry
+	tar.mu.Unlock()
 
 	return entry, nil
 }
 
 // Get retrieves a transaction entry and touches it
-func (tm *TxManager) Get(txID string) (dsIdx uint16, entry *TxEntry, err error) {
-	tm.mu.RLock()
-	entry, ok := tm.entries[txID]
-	tm.mu.RUnlock()
+func (tm *TxManager) getTx(txID string) (entry *TxEntry, dsIdx int, err error) {
+	txInfo, err := tm.txIDGen.VerifyAndParse(txID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to verify and parse txID: %w", err)
+	}
+
+	tar := tm.tars[txInfo.DsIndex]
+	tar.mu.RLock()
+	entry, ok := tar.entries[txID]
+	tar.mu.RUnlock()
 
 	if !ok {
-		return 0, nil, ErrTxNotFound
+		return nil, 0, ErrTxNotFound
 	}
 
 	// Check if expired
-	if entry.IsExpired() {
+	if time.Now().After(entry.ExpiresAt) {
 		// Remove expired entry
-		tm.mu.Lock()
-		delete(tm.entries, txID)
-		tm.mu.Unlock()
+		tar.mu.Lock()
+		delete(tar.entries, txID)
+		tar.mu.Unlock()
 		// Cleanup connection
 		go func() {
 			entry.Tx.Rollback()
 			entry.Conn.Close()
 		}()
-		return 0, nil, ErrTxExpired
+		return nil, 0, ErrTxExpired
 	}
 
-	// Touch to extend expiration
-	entry.Touch(time.Until(entry.ExpiresAt))
-
-	txInfo, err := tm.txIDGen.VerifyAndParse(txID)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to verify and parse txID: %w", err)
-	}
-	return txInfo.DsIndex, entry, nil
+	return entry, txInfo.DsIndex, nil
 }
 
 // Commit commits a transaction
 func (tm *TxManager) Commit(txID string) error {
-	tm.mu.Lock()
-	entry, ok := tm.entries[txID]
-	if ok {
-		delete(tm.entries, txID)
-	}
-	tm.mu.Unlock()
-
-	if !ok {
-		return ErrTxNotFound
+	entry, _, err := tm.getTx(txID)
+	if err != nil {
+		return err
 	}
 
 	// Commit transaction
-	err := entry.Tx.Commit()
+	err = entry.Tx.Commit()
 
-	// Always close connection
-	entry.Conn.Close()
+	tm.close(entry)
 
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -186,22 +189,15 @@ func (tm *TxManager) Commit(txID string) error {
 
 // Rollback rolls back a transaction
 func (tm *TxManager) Rollback(txID string) error {
-	tm.mu.Lock()
-	entry, ok := tm.entries[txID]
-	if ok {
-		delete(tm.entries, txID)
-	}
-	tm.mu.Unlock()
-
-	if !ok {
-		return ErrTxNotFound
+	entry, _, err := tm.getTx(txID)
+	if err != nil {
+		return err
 	}
 
 	// Rollback transaction
-	err := entry.Tx.Rollback()
+	err = entry.Tx.Rollback()
 
-	// Always close connection
-	entry.Conn.Close()
+	tm.close(entry)
 
 	if err != nil {
 		return fmt.Errorf("failed to rollback transaction: %w", err)
@@ -211,40 +207,54 @@ func (tm *TxManager) Rollback(txID string) error {
 }
 
 // QueryContext queries the database
-func (tm *TxManager) Query(ctx context.Context, datasourceIdx int, sql string, args ...any) (*sql.Rows, error) {
-	ds, ok := tm.datasources.Get(datasourceIdx)
-	if !ok {
+func (tm *TxManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, error) {
+	tar := tm.tars[datasourceIdx]
+	if tar == nil {
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
-	return ds.DB.QueryContext(ctx, sql, args...)
+	if timeoutSec == nil {
+		timeoutSec = &tar.ds.DefaultQueryTimeoutSec
+	}
+	ctx, _ = context.WithTimeout(ctx, time.Duration(*timeoutSec)*time.Second)
+
+	return tar.ds.DB.QueryContext(ctx, sql, parameters...)
 }
 
 // QueryContext queries the database
-func (tm *TxManager) QueryTx(ctx context.Context, timoutSec int, txId string, sql string, args ...any) (*sql.Rows, error) {
-	_, entry, err := tm.Get(txId)
+func (tm *TxManager) QueryTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (*sql.Rows, error) {
+	entry, _, err := tm.getTx(txId)
 	if err != nil {
-		if err == ErrTxNotFound || err == ErrTxExpired {
-			return nil, fmt.Errorf("Transaction not found or expired: %v", err)
-		}
-		return nil, fmt.Errorf("Failed to get transaction: %v", err)
+		return nil, err
 	}
 
-	return entry.Tx.QueryContext(ctx, sql, args...)
+	if timeoutSec == nil {
+		timeoutSec = &tm.tars[entry.dsIdx].ds.DefaultQueryTimeoutSec
+	}
+	ctx, _ = context.WithTimeout(ctx, time.Duration(*timeoutSec)*time.Second)
+
+	rows, err := entry.Tx.QueryContext(ctx, sql, parameters...)
+	entry.touch()
+
+	return rows, err
 }
 
 // ExecContext executes the database
-func (tm *TxManager) Exec(ctx context.Context, datasourceIdx int, sql string, args ...any) (sql.Result, error) {
-	ds, ok := tm.datasources.Get(datasourceIdx)
-	if !ok {
+func (tm *TxManager) Exec(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, error) {
+	tar := tm.tars[datasourceIdx]
+	if tar == nil {
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
-	return ds.DB.ExecContext(ctx, sql, args...)
+	if timeoutSec == nil {
+		timeoutSec = &tar.ds.DefaultQueryTimeoutSec
+	}
+	ctx, _ = context.WithTimeout(ctx, time.Duration(*timeoutSec)*time.Second)
+
+	return tar.ds.DB.ExecContext(ctx, sql, parameters...)
 }
 
 // ExecContext executes the database
-func (tm *TxManager) ExecTx(ctx context.Context, timoutSec int, txId string, sql string, args ...any) (sql.Result, error) {
-	// Get transaction entry
-	_, entry, err := tm.Get(txId)
+func (tm *TxManager) ExecTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, error) {
+	entry, _, err := tm.getTx(txId)
 	if err != nil {
 		if err == ErrTxNotFound || err == ErrTxExpired {
 			return nil, fmt.Errorf("Transaction not found or expired: %v", err)
@@ -252,27 +262,31 @@ func (tm *TxManager) ExecTx(ctx context.Context, timoutSec int, txId string, sql
 		return nil, fmt.Errorf("Failed to get transaction: %v", err)
 	}
 
-	return entry.Tx.ExecContext(ctx, sql, args...)
+	if timeoutSec == nil {
+		timeoutSec = &tm.tars[entry.dsIdx].ds.DefaultQueryTimeoutSec
+	}
+	ctx, _ = context.WithTimeout(ctx, time.Duration(*timeoutSec)*time.Second)
+
+	result, err := entry.Tx.ExecContext(ctx, sql, parameters...)
+	entry.touch()
+
+	return result, err
 }
 
-func (tm *TxManager) Statistics(datasourceIdx int) (int, int, int) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+func (tm *TxManager) Statistics(datasourceIdx int) (error, int, int, int) {
+	tar := tm.tars[datasourceIdx]
+	if tar == nil {
+		return fmt.Errorf("datasource not found: %d", datasourceIdx), 0, 0, 0
+	}
+	tar.mu.RLock()
+	defer tar.mu.RUnlock()
 
-	ds, _ := tm.datasources.Get(datasourceIdx)
-	stats := ds.DB.Stats()
+	stats := tar.ds.DB.Stats()
 	openConns := stats.OpenConnections
 	idleConns := stats.Idle
 	//waitConns := int(stats.WaitCount)
 
-	runningTx := 0
-	for _, entry := range tm.entries {
-		if entry.DsIdx == datasourceIdx {
-			runningTx++
-		}
-	}
-
-	return openConns, idleConns, runningTx
+	return nil, openConns, idleConns, len(tar.entries)
 }
 
 // cleanupExpired periodically cleans up expired transactions
@@ -284,38 +298,29 @@ func (tm *TxManager) cleanupExpired() {
 
 	for {
 		select {
-		case <-ticker.C:
-			tm.cleanup()
 		case <-tm.stopCleanup:
 			return
+		case <-ticker.C:
+			now := time.Now()
+			var expired []*TxEntry
+
+			for _, tar := range tm.tars {
+				tar.mu.Lock()
+				for txID, entry := range tar.entries {
+					if now.After(entry.ExpiresAt) {
+						expired = append(expired, entry)
+						delete(tar.entries, txID)
+					}
+				}
+				tar.mu.Unlock()
+			}
+			// Cleanup expired entries
+			for _, entry := range expired {
+				entry.Tx.Rollback()
+				entry.Conn.Close()
+			}
 		}
 	}
-}
-
-// cleanup removes expired transactions
-func (tm *TxManager) cleanup() {
-	now := time.Now()
-	var expired []*TxEntry
-
-	tm.mu.Lock()
-	for txID, entry := range tm.entries {
-		if now.After(entry.ExpiresAt) {
-			expired = append(expired, entry)
-			delete(tm.entries, txID)
-		}
-	}
-	tm.mu.Unlock()
-
-	// Cleanup expired entries
-	for _, entry := range expired {
-		entry.Tx.Rollback()
-		entry.Conn.Close()
-	}
-}
-
-// GetDatasources returns the datasources instance
-func (tm *TxManager) GetDatasources() *Datasources {
-	return tm.datasources
 }
 
 // Shutdown stops the cleanup goroutine
@@ -324,15 +329,14 @@ func (tm *TxManager) Shutdown() {
 	tm.wg.Wait()
 
 	// Rollback all remaining transactions
-	tm.mu.Lock()
-	entries := make([]*TxEntry, 0, len(tm.entries))
-	for _, entry := range tm.entries {
-		entries = append(entries, entry)
-	}
-	tm.mu.Unlock()
+	for _, tar := range tm.tars {
+		tar.mu.Lock()
+		for _, entry := range tar.entries {
+			entry.Tx.Rollback()
+			entry.Conn.Close()
+		}
 
-	for _, entry := range entries {
-		entry.Tx.Rollback()
-		entry.Conn.Close()
+		tar.ds.Close()
+		tar.mu.Unlock()
 	}
 }

@@ -12,8 +12,8 @@ import (
 
 // BeginTxRequest represents the request body for /v1/rdb/tx/begin
 type BeginTxRequest struct {
-	ClientNodeIndex int `json:"clientNodeIndex"`
-	TimeoutSec      int `json:"timeoutSec,omitempty"`
+	ClientNodeIndex int  `json:"clientNodeIndex"`
+	TimeoutSec      *int `json:"timeoutSec,omitempty"`
 }
 
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
