@@ -72,7 +72,16 @@ func (e *TxEntry) cleanup() {
 type TxDatasource struct {
 	Datasource
 	entries map[string]*TxEntry
-	mu      sync.RWMutex
+	mu      sync.Mutex
+	cond    *sync.Cond
+}
+
+func (ds *TxDatasource) waitTxAvailable() {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	for len(ds.entries) >= ds.MaxTxConns {
+		ds.cond.Wait()
+	}
 }
 
 // TxManager manages transactions
@@ -93,10 +102,12 @@ func NewTxManager(configs []Config) *TxManager {
 			panic(fmt.Sprintf("failed to initialize datasource %s: %v", cfg.DatasourceID, err))
 		}
 
-		dss[i] = &TxDatasource{
+		txDs := &TxDatasource{
 			Datasource: *ds,
 			entries:    make(map[string]*TxEntry),
 		}
+		txDs.cond = sync.NewCond(&txDs.mu)
+		dss[i] = txDs
 	}
 	tm := &TxManager{
 		dss:         dss,
@@ -118,14 +129,9 @@ func (tm *TxManager) Begin(clientNodeIndex int, datasourceIdx int, isolationLeve
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
 
-	ds.mu.Lock()
-	if len(ds.entries) >= ds.MaxTxConns {
-		ds.mu.Unlock()
-		return nil, fmt.Errorf("maximum number of transactions reached for datasource %d", datasourceIdx)
-	}
-	ds.mu.Unlock()
+	ds.waitTxAvailable()
 
-	txID, err := tm.txIDGen.Generate(clientNodeIndex, datasourceIdx)
+	txID, err := tm.txIDGen.Generate(datasourceIdx, clientNodeIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate txid: %w", err)
 	}
@@ -155,6 +161,7 @@ func (tm *TxManager) Begin(clientNodeIndex int, datasourceIdx int, isolationLeve
 	ds.mu.Lock()
 	ds.entries[txID] = entry
 	ds.mu.Unlock()
+	fmt.Printf("Registered transaction: %s, total entries: %d\n", txID, len(ds.entries))
 
 	return entry, nil
 }
@@ -167,9 +174,9 @@ func (tm *TxManager) getTx(txID string) (tarDs *TxDatasource, entry *TxEntry, er
 	}
 
 	ds := tm.dss[txInfo.DatasourceIndex]
-	ds.mu.RLock()
+	ds.mu.Lock()
 	entry, ok := ds.entries[txID]
-	ds.mu.RUnlock()
+	ds.mu.Unlock()
 
 	if !ok {
 		return nil, nil, ErrTxNotFound
@@ -180,6 +187,7 @@ func (tm *TxManager) getTx(txID string) (tarDs *TxDatasource, entry *TxEntry, er
 		// Remove expired entry
 		ds.mu.Lock()
 		delete(ds.entries, txID)
+		ds.cond.Signal() // 待機中のgoroutineに通知
 		ds.mu.Unlock()
 		// Cleanup connection
 		go entry.rollback()
@@ -204,6 +212,7 @@ func (tm *TxManager) Commit(txID string) error {
 
 	ds.mu.Lock()
 	delete(ds.entries, txID)
+	ds.cond.Signal() // 待機中のgoroutineに通知
 	ds.mu.Unlock()
 
 	return nil
@@ -224,6 +233,7 @@ func (tm *TxManager) Rollback(txID string) error {
 
 	ds.mu.Lock()
 	delete(ds.entries, txID)
+	ds.cond.Signal() // 待機中のgoroutineに通知
 	ds.mu.Unlock()
 
 	return nil
@@ -310,8 +320,8 @@ func (tm *TxManager) Statistics(datasourceIdx int) (error, int, int, int) {
 	if ds == nil {
 		return fmt.Errorf("datasource not found: %d", datasourceIdx), 0, 0, 0
 	}
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 
 	stats := ds.DB.Stats()
 	openConns := stats.OpenConnections
@@ -338,11 +348,16 @@ func (tm *TxManager) cleanupExpired() {
 
 			for _, ds := range tm.dss {
 				ds.mu.Lock()
+				removedCount := 0
 				for txID, entry := range ds.entries {
 					if now.After(entry.ExpiresAt) {
 						expired = append(expired, entry)
 						delete(ds.entries, txID)
+						removedCount++
 					}
+				}
+				if removedCount > 0 {
+					ds.cond.Broadcast() // 複数のエントリが削除された可能性があるので、すべての待機中のgoroutineに通知
 				}
 				ds.mu.Unlock()
 			}

@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	clientDataHolderSize = 1
+	issuedAtSecondsSize  = 4
+	sequenceNumberSize   = 4
 	datasourceIndexSize  = 1
-	issuedAtMsSize       = 8
-	sequenceNumberSize   = 2
-	randomSize           = 8
-	txIDPayloadSize      = clientDataHolderSize + datasourceIndexSize + issuedAtMsSize + sequenceNumberSize + randomSize
+	clientDataHolderSize = 1
+	randomSize           = 5
+	txIDPayloadSize      = issuedAtSecondsSize + sequenceNumberSize + datasourceIndexSize + clientDataHolderSize + randomSize
 )
 
 var (
@@ -31,41 +31,47 @@ type TxInfo struct {
 
 // TxIDGenerator handles transaction ID generation and verification
 type TxIDGenerator struct {
-	sequenceNumber uint32 // 0-65535 (0xFFFF) で繰り返すカウンター
+	sequenceNumber uint32 // 0-4294967295 (0xFFFFFFFF) counter
 }
 
 // NewTxIDGenerator creates a new TxIDGenerator with the given secret
 func NewTxIDGenerator() *TxIDGenerator {
-	return &TxIDGenerator{}
+	seedBytes := make([]byte, 4)
+	if _, err := rand.Read(seedBytes); err != nil {
+		// If an error occurs, start from 0 (very rare case)
+		return &TxIDGenerator{}
+	}
+	return &TxIDGenerator{
+		sequenceNumber: binary.BigEndian.Uint32(seedBytes),
+	}
 }
 
 // Generate creates a new transaction ID
-// Format: base64url( clientDataHolder|datasourceIndex|issuedAtMs|sequenceNumber|randomBytes )
-func (g *TxIDGenerator) Generate(clientNodeIndex int, datasourceIndex int) (string, error) {
+// Format: base64url( issuedAtSeconds|sequenceNumber|datasourceIndex|clientNodeIndex|randomBytes )
+func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (string, error) {
 	// Allocate buffer for payload
 	payload := make([]byte, txIDPayloadSize)
 	offset := 0
 
-	// ownerNodeShort: 1 bytes
-	payload[offset] = uint8(clientNodeIndex)
-	offset += clientDataHolderSize
+	// issuedAtSeconds: 4 bytes (uint32)
+	issuedAtSeconds := uint32(time.Now().Unix())
+	binary.BigEndian.PutUint32(payload[offset:], issuedAtSeconds)
+	offset += issuedAtSecondsSize
 
-	// datasourceShort: 1 bytes
+	// sequenceNumber: 4 bytes (0-4294967295で繰り返す)
+	seqNum := atomic.AddUint32(&g.sequenceNumber, 1)
+	binary.BigEndian.PutUint32(payload[offset:], seqNum)
+	offset += sequenceNumberSize
+
+	// datasourceIndex: 1 bytes
 	payload[offset] = uint8(datasourceIndex)
 	offset += datasourceIndexSize
 
-	// issuedAtMs: 8 bytes (uint64)
-	issuedAtMs := uint64(time.Now().UnixMilli())
-	binary.BigEndian.PutUint64(payload[offset:], issuedAtMs)
-	offset += issuedAtMsSize
+	// clientDataHolder: 1 bytes
+	payload[offset] = uint8(clientNodeIndex)
+	offset += clientDataHolderSize
 
-	// sequenceNumber: 2 bytes (0-65533で繰り返す)
-	seqNum := atomic.AddUint32(&g.sequenceNumber, 1)
-	seqNum = seqNum % 65534 // 0-65533の範囲に収める
-	binary.BigEndian.PutUint16(payload[offset:], uint16(seqNum))
-	offset += sequenceNumberSize
-
-	// randomBytes: 8 bytes, and also used for security
+	// randomBytes: 5 bytes, and also used for security
 	randomBytes := make([]byte, randomSize)
 	if _, err := rand.Read(randomBytes); err != nil {
 		// This should almost never happen, but if it does, return an error
@@ -93,22 +99,22 @@ func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
 	// Parse payload
 	offset := 0
 
-	// ownerNodeShort: 1 byte
-	offset += clientDataHolderSize
+	// issuedAtSeconds: 4 bytes
+	issuedAtSeconds := binary.BigEndian.Uint32(payload[offset:])
+	issuedAt := time.Unix(int64(issuedAtSeconds), 0)
+	offset += issuedAtSecondsSize
 
-	// datasourceShort: 1 byte
+	// sequenceNumber: 4 bytes
+	offset += sequenceNumberSize
+
+	// datasourceIndex: 1 byte
 	datasourceIndex := payload[offset]
 	offset += datasourceIndexSize
 
-	// issuedAtMs: 8 bytes
-	issuedAtMs := binary.BigEndian.Uint64(payload[offset:])
-	offset += issuedAtMsSize
-	issuedAt := time.UnixMilli(int64(issuedAtMs))
+	// clientNodeIndex: 1 byte
+	offset += clientDataHolderSize
 
-	// sequenceNumber: 2 bytes
-	offset += sequenceNumberSize
-
-	// random8: 8 bytes
+	// randomBytes: 5 bytes
 	offset += randomSize
 
 	return &TxInfo{
