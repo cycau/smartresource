@@ -166,7 +166,7 @@ func (tm *TxManager) getTx(txID string) (tarDs *TxDatasource, entry *TxEntry, er
 		return nil, nil, fmt.Errorf("failed to verify and parse txID: %w", err)
 	}
 
-	ds := tm.dss[txInfo.DsIndex]
+	ds := tm.dss[txInfo.DatasourceIndex]
 	ds.mu.RLock()
 	entry, ok := ds.entries[txID]
 	ds.mu.RUnlock()
