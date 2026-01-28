@@ -72,7 +72,9 @@ type ExecHandler struct {
 	txManager *TxManager
 }
 
-// NewExecuteHandler creates a new ExecuteHandler
+/************************************************************
+ * NewExecuteHandler creates a new ExecuteHandler
+ ************************************************************/
 func NewExecHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *ExecHandler {
 	return &ExecHandler{
 		selfNode:  nodeInfo,
@@ -94,13 +96,13 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	defer exec.statisticsRequest(dsIDX, -1)
 
 	var rows *sql.Rows
-	var cancel context.CancelFunc
+	var releaseResource releaseResourceFunc
 	var queryErr error
 
 	if req.TxID == nil {
 		// Execute query without transaction
-		rows, cancel, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
-		defer cancel()
+		rows, releaseResource, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -114,8 +116,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 	} else {
 		// Execute query in transaction
-		rows, cancel, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
-		defer cancel()
+		rows, releaseResource, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -247,12 +249,12 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	defer exec.statisticsRequest(dsIDX, -1)
 
 	var result sql.Result
-	var cancel context.CancelFunc
+	var releaseResource releaseResourceFunc
 	var execErr error
 	if req.TxID == nil {
 		// Get database
-		result, cancel, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
-		defer cancel()
+		result, releaseResource, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -265,8 +267,8 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Execute in transaction
-		result, cancel, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
-		defer cancel()
+		result, releaseResource, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
 				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
@@ -303,25 +305,23 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// updateRunningSql updates the RunningSql count for a datasource
+/************************************************************
+ * statistics methods
+ ************************************************************/
 func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
 	exec.selfNode.Mu.Lock()
-	defer exec.selfNode.Mu.Unlock()
 
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
 	dsInfo.RunningSql += delta
 	if dsInfo.RunningSql < 0 {
 		dsInfo.RunningSql = 0
 	}
+
+	exec.selfNode.Mu.Unlock()
 }
 
 func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
-	// Get data that requires TxManager locks BEFORE acquiring SqlHandler lock
-	// This prevents potential deadlock if TxManager ever needs to call SqlHandler methods
-
-	// Now acquire SqlHandler lock to update shared state
 	exec.selfNode.Mu.Lock()
-	defer exec.selfNode.Mu.Unlock()
 
 	// Find or create datasource info
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
@@ -338,8 +338,13 @@ func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, is
 		// Simple error rate calculation (would need proper time-windowed tracking)
 		// For now, we'll just increment a counter that gets reset periodically
 	}
+
+	exec.selfNode.Mu.Unlock()
 }
 
+/************************************************************
+ * Private methods
+ ************************************************************/
 /*
 POST /query?dbName=&txId=
 Body:
@@ -375,10 +380,6 @@ func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []a
 
 	return dsIDX, req, parameters, nil
 }
-
-/************************************************************
- * Private methods
- ************************************************************/
 
 func convertParams(params []ParamValue) ([]any, error) {
 	args := make([]any, len(params))

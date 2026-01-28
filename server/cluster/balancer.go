@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -37,7 +38,7 @@ const (
 )
 
 /*****************************
- * インスタンス化
+ * initialize Balancer
  *****************************/
 func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
 	return &Balancer{
@@ -47,7 +48,7 @@ func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
 }
 
 /*****************************
- * ノード選出
+ * select Node
  *****************************/
 func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
@@ -179,12 +180,13 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// 307 Temporary Redirect
 		w.Header().Set("Location", selectedNode.NodeID)
 		w.WriteHeader(http.StatusTemporaryRedirect)
+		fmt.Fprintf(w, "Redirecting to Node[%s] [%f, %f]\n", selectedNode.NodeID, selfBestScore.score, randomNodeScore.score)
 	}
 	return http.HandlerFunc(fn)
 }
 
-// 80%以下なら自分で処理、それ以外は他ノードとの協調を試みる
-func selectSelfDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOINT_TYPE) (*scoreWithWeight, *scoreWithWeight) {
+// select Self Datasource if usage is less than 80%, otherwise try cooperative processing with other nodes
+func selectSelfDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOINT_TYPE) (best *scoreWithWeight, weightedRandom *scoreWithWeight) {
 	if node.Status != SERVING {
 		return nil, nil
 	}
@@ -224,7 +226,7 @@ func selectSelfDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOIN
 		return nil, nil
 	}
 
-	// 使用率80%以下なら、他のノードとの協調を試みる
+	// 使用率80%以上なら、他のノードとの協調を試みる
 	if float64(node.HealthInfo.RunningHttp)/float64(node.HealthInfo.MaxHttpSessions) >= USAGE_THRESHOLD {
 		return bestScore, nil
 	}
@@ -243,9 +245,8 @@ func selectSelfDatasource(node *NodeInfo, databaseName *string, endpoint ENDPOIN
 	return bestScore, weightedRandomScore
 }
 
-// ノード選択（TopK + Weighted Random）
-// return: BestScore, WeightedRandomScore
-func selectBestRandom(scores []scoreWithWeight) (*scoreWithWeight, *scoreWithWeight) {
+// TopK + Weighted Random
+func selectBestRandom(scores []scoreWithWeight) (best *scoreWithWeight, weightedRandom *scoreWithWeight) {
 	if len(scores) == 0 {
 		return nil, nil
 	}
@@ -301,11 +302,6 @@ func clamp01(x float64) float64 {
 	return math.Min(1.0, math.Max(0.0, x))
 }
 
-// log1p log(1+x)
-func log1p(x float64) float64 {
-	return math.Log1p(x)
-}
-
 // 正規化された指標を計算
 type normalizedMetrics struct {
 	httpFree    float64
@@ -334,7 +330,7 @@ func calculateMetrics(node *NodeInfo, dsIdx int) normalizedMetrics {
 	txFree := 1 - clamp01(txUsage)
 
 	// 品質指標の正規化
-	latScore := 1 - clamp01(log1p(float64(dsInfo.LatencyP95Ms))/log1p(LAT_BAD_MS))
+	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
 	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_BAD)
 	toScore := 1 - clamp01(float64(dsInfo.Timeouts1m)/TIMEOUT_BAD)
 	waitScore := 1 - clamp01(float64(dsInfo.WaitConns)/WAIT_BAD)
@@ -389,17 +385,14 @@ func calculateScore(m normalizedMetrics, endpoint ENDPOINT_TYPE) float64 {
 	return 0
 }
 
-// ノードスコア情報
+// Node score information
 type scoreWithWeight struct {
 	score  float64
 	weight float64
 	index  int
 }
 
-/*****************************
- * リクエスト情報抽出
- *****************************/
-// get: endpoint, dbName, txId
+// parse request and return endpoint, database name, and transaction ID
 func parseRequest(r *http.Request) (ENDPOINT_TYPE, *string, *string) {
 
 	path := r.URL.Path
