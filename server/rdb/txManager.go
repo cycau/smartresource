@@ -18,6 +18,7 @@ var (
 type TxEntry struct {
 	TxID        string
 	dsIdx       int
+	ongoing     bool
 	ExpiresAt   time.Time
 	idleTimeout *time.Duration
 	Conn        *sql.Conn
@@ -46,21 +47,19 @@ func (e *TxEntry) ExecContext(ctx context.Context, query string, args ...interfa
 
 func (e *TxEntry) commit() error {
 	err := e.Tx.Commit()
+	e.touch()
 	if err != nil {
-		e.touch()
 		return err
 	}
-	e.Conn.Close()
 	return nil
 }
 
 func (e *TxEntry) rollback() error {
 	err := e.Tx.Rollback()
+	e.touch()
 	if err != nil {
-		e.touch()
 		return err
 	}
-	e.Conn.Close()
 	return nil
 }
 
@@ -76,12 +75,66 @@ type TxDatasource struct {
 	cond    *sync.Cond
 }
 
-func (ds *TxDatasource) waitTxAvailable() {
+func (ds *TxDatasource) reserveEntry(txID string) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	for len(ds.entries) >= ds.MaxTxConns {
 		ds.cond.Wait()
 	}
+	ds.entries[txID] = nil
+}
+
+func (ds *TxDatasource) registerEntry(entry *TxEntry) {
+	ds.mu.Lock()
+	ds.entries[entry.TxID] = entry
+	ds.mu.Unlock()
+}
+
+func (ds *TxDatasource) getEntry(txID string) (*TxEntry, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	entry, ok := ds.entries[txID]
+	if !ok {
+		return nil, ErrTxNotFound
+	}
+
+	// Check if expired
+	if time.Now().After(entry.ExpiresAt) {
+		// Remove expired entry
+		delete(ds.entries, txID)
+		ds.cond.Signal() // notify waiting goroutines
+
+		// Cleanup connection
+		go entry.rollback()
+		return nil, ErrTxExpired
+	}
+
+	entry.ongoing = true
+	return entry, nil
+}
+
+func (ds *TxDatasource) givebackEntry(txID string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	entry, ok := ds.entries[txID]
+	if !ok {
+		return ErrTxNotFound
+	}
+
+	entry.ongoing = false
+	entry.touch()
+	return nil
+}
+
+func (ds *TxDatasource) closeEntry(entry *TxEntry) {
+	entry.Conn.Close()
+
+	ds.mu.Lock()
+	delete(ds.entries, entry.TxID)
+	ds.cond.Signal() // notify waiting goroutines
+	ds.mu.Unlock()
 }
 
 // TxManager manages transactions
@@ -123,18 +176,18 @@ func NewTxManager(configs []Config) *TxManager {
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(clientNodeIndex int, datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
+func (tm *TxManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int, clientNodeIndex int) (*TxEntry, error) {
+	txID, err := tm.txIDGen.Generate(datasourceIdx, clientNodeIndex)
+	if err != nil {
+		return nil, err
+	}
+
 	ds := tm.dss[datasourceIdx]
 	if ds == nil {
 		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
 	}
 
-	ds.waitTxAvailable()
-
-	txID, err := tm.txIDGen.Generate(datasourceIdx, clientNodeIndex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate txid: %w", err)
-	}
+	ds.reserveEntry(txID)
 
 	conn, tx, err := ds.newTx(isolationLevel)
 	if err != nil {
@@ -158,48 +211,31 @@ func (tm *TxManager) Begin(clientNodeIndex int, datasourceIdx int, isolationLeve
 	}
 
 	// Register entry
-	ds.mu.Lock()
-	ds.entries[txID] = entry
-	ds.mu.Unlock()
+	ds.registerEntry(entry)
 	fmt.Printf("Registered transaction: %s, total entries: %d\n", txID, len(ds.entries))
 
 	return entry, nil
 }
 
 // Get retrieves a transaction entry and touches it
-func (tm *TxManager) getTx(txID string) (tarDs *TxDatasource, entry *TxEntry, err error) {
-	txInfo, err := tm.txIDGen.VerifyAndParse(txID)
+func (tm *TxManager) getTx(txID string) (entry *TxEntry, srcDs *TxDatasource, err error) {
+	dsIdx, err := tm.txIDGen.GetDatasourceIndex(txID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to verify and parse txID: %w", err)
+		return nil, nil, err
 	}
 
-	ds := tm.dss[txInfo.DatasourceIndex]
-	ds.mu.Lock()
-	entry, ok := ds.entries[txID]
-	ds.mu.Unlock()
-
-	if !ok {
-		return nil, nil, ErrTxNotFound
+	ds := tm.dss[dsIdx]
+	entry, err = ds.getEntry(txID)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Check if expired
-	if time.Now().After(entry.ExpiresAt) {
-		// Remove expired entry
-		ds.mu.Lock()
-		delete(ds.entries, txID)
-		ds.cond.Signal() // 待機中のgoroutineに通知
-		ds.mu.Unlock()
-		// Cleanup connection
-		go entry.rollback()
-		return nil, nil, ErrTxExpired
-	}
-
-	return ds, entry, nil
+	return entry, ds, nil
 }
 
-// Commit commits a transaction
+// Commit commits a transaction^
 func (tm *TxManager) Commit(txID string) error {
-	ds, entry, err := tm.getTx(txID)
+	entry, ds, err := tm.getTx(txID)
 	if err != nil {
 		return err
 	}
@@ -210,17 +246,14 @@ func (tm *TxManager) Commit(txID string) error {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	ds.mu.Lock()
-	delete(ds.entries, txID)
-	ds.cond.Signal() // 待機中のgoroutineに通知
-	ds.mu.Unlock()
+	ds.closeEntry(entry)
 
 	return nil
 }
 
 // Rollback rolls back a transaction
 func (tm *TxManager) Rollback(txID string) error {
-	ds, entry, err := tm.getTx(txID)
+	entry, ds, err := tm.getTx(txID)
 	if err != nil {
 		return err
 	}
@@ -231,10 +264,7 @@ func (tm *TxManager) Rollback(txID string) error {
 		return fmt.Errorf("failed to rollback transaction: %w", err)
 	}
 
-	ds.mu.Lock()
-	delete(ds.entries, txID)
-	ds.cond.Signal() // 待機中のgoroutineに通知
-	ds.mu.Unlock()
+	ds.closeEntry(entry)
 
 	return nil
 }
@@ -258,7 +288,7 @@ func (tm *TxManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx i
 
 // QueryContext queries the database
 func (tm *TxManager) QueryTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (*sql.Rows, context.CancelFunc, error) {
-	ds, entry, err := tm.getTx(txId)
+	entry, ds, err := tm.getTx(txId)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -295,7 +325,7 @@ func (tm *TxManager) Exec(ctx context.Context, timeoutSec *int, datasourceIdx in
 
 // ExecContext executes the database
 func (tm *TxManager) ExecTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, context.CancelFunc, error) {
-	ds, entry, err := tm.getTx(txId)
+	entry, ds, err := tm.getTx(txId)
 	if err != nil {
 		if err == ErrTxNotFound || err == ErrTxExpired {
 			return nil, nil, fmt.Errorf("Transaction not found or expired: %v", err)

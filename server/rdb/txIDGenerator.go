@@ -23,12 +23,6 @@ var (
 	ErrInvalidTxID = errors.New("invalid txID format")
 )
 
-// TxInfo contains decoded transaction ID information
-type TxInfo struct {
-	DatasourceIndex int
-	IssuedAt        time.Time
-}
-
 // TxIDGenerator handles transaction ID generation and verification
 type TxIDGenerator struct {
 	sequenceNumber uint32 // 0-4294967295 (0xFFFFFFFF) counter
@@ -84,24 +78,22 @@ func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (stri
 }
 
 // VerifyAndParse verifies and parses a transaction ID
-func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
+func (g *TxIDGenerator) GetDatasourceIndex(txId string) (int, error) {
 	// Decode base64url
 	payload, err := base64.RawURLEncoding.DecodeString(txId)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidTxID, err)
+		return 0, fmt.Errorf("%w: %v", ErrInvalidTxID, err)
 	}
 
 	// Check size
 	if len(payload) != txIDPayloadSize {
-		return nil, fmt.Errorf("%w: invalid size", ErrInvalidTxID)
+		return 0, fmt.Errorf("%w: invalid size", ErrInvalidTxID)
 	}
 
 	// Parse payload
 	offset := 0
 
 	// issuedAtSeconds: 4 bytes
-	issuedAtSeconds := binary.BigEndian.Uint32(payload[offset:])
-	issuedAt := time.Unix(int64(issuedAtSeconds), 0)
 	offset += issuedAtSecondsSize
 
 	// sequenceNumber: 4 bytes
@@ -111,14 +103,5 @@ func (g *TxIDGenerator) VerifyAndParse(txId string) (*TxInfo, error) {
 	datasourceIndex := payload[offset]
 	offset += datasourceIndexSize
 
-	// clientNodeIndex: 1 byte
-	offset += clientDataHolderSize
-
-	// randomBytes: 5 bytes
-	offset += randomSize
-
-	return &TxInfo{
-		DatasourceIndex: int(datasourceIndex),
-		IssuedAt:        issuedAt,
-	}, nil
+	return int(datasourceIndex), nil
 }

@@ -56,7 +56,7 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := tx.txManager.Begin(req.ClientNodeIndex, dsIDX, sql.LevelReadCommitted, req.TimeoutSec)
+	txEntry, err := tx.txManager.Begin(dsIDX, sql.LevelReadCommitted, req.TimeoutSec, req.ClientNodeIndex)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
