@@ -63,7 +63,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			return
 		}
 
-		endpoint, tarDbName, txID := parseRequest(r)
+		endpoint, tarDbName, txID, dsID := parseRequest(r)
 
 		// 対象外のパスはそのまま処理
 		if endpoint == EP_Other {
@@ -92,6 +92,20 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			b.SelfNode.Mu.Unlock()
 		}()
 
+		// Datasource指定がある場合はそのまま処理
+		if dsID != "" {
+			for idx, ds := range b.SelfNode.HealthInfo.Datasources {
+				if ds.DatasourceID == dsID {
+					ctx := context.WithValue(r.Context(), "$S_IDX", idx)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+			http.Error(w, `Invalid datasource ID [`+dsID+`]`, http.StatusBadRequest)
+			return
+		}
+
+		/*** ノード選択処理 ***/
 		selfNode := b.SelfNode.Clone()
 
 		// 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
@@ -400,7 +414,7 @@ type scoreWithWeight struct {
 }
 
 // parse request and return endpoint, database name, and transaction ID
-func parseRequest(r *http.Request) (endpoint ENDPOINT_TYPE, dbName string, txID string) {
+func parseRequest(r *http.Request) (endpoint ENDPOINT_TYPE, dbName string, txID string, dsIDX string) {
 
 	path := r.URL.Path
 	if strings.HasSuffix(path, "/query") {
@@ -415,8 +429,9 @@ func parseRequest(r *http.Request) (endpoint ENDPOINT_TYPE, dbName string, txID 
 
 	query := r.URL.Query()
 
-	dbName = query.Get("dbName")
-	txID = query.Get("txID")
+	dbName = query.Get("_DbName")
+	txID = query.Get("_TxID")
+	dsIDX = query.Get("_DsIDX")
 
-	return endpoint, dbName, txID
+	return endpoint, dbName, txID, dsIDX
 }
