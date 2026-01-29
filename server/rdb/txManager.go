@@ -237,7 +237,7 @@ func (tm *TxManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *
 
 // Commit commits a transaction
 func (tm *TxManager) Commit(txID string) error {
-	entry, ds, err := tm.getTx(txID, false)
+	entry, _, err := tm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
@@ -248,14 +248,12 @@ func (tm *TxManager) Commit(txID string) error {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	ds.closeEntry(entry)
-
 	return nil
 }
 
 // Rollback rolls back a transaction
 func (tm *TxManager) Rollback(txID string) error {
-	entry, ds, err := tm.getTx(txID, false)
+	entry, _, err := tm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
@@ -264,6 +262,16 @@ func (tm *TxManager) Rollback(txID string) error {
 
 	if err != nil {
 		return fmt.Errorf("failed to rollback transaction: %w", err)
+	}
+
+	return nil
+}
+
+// Rollback rolls back a transaction
+func (tm *TxManager) Close(txID string) error {
+	entry, ds, err := tm.getTx(txID, false)
+	if err != nil {
+		return err
 	}
 
 	ds.closeEntry(entry)

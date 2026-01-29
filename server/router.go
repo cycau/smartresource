@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"time"
 
@@ -40,7 +41,37 @@ func NewRouter(balancer *cluster.Balancer, txManager *rdb.TxManager) *Router {
 /*****************************
  * 各ノードの health 情報を取得
  *****************************/
-func (r *Router) CollectHealth() {
+func (r *Router) StartCollectHealthTicker() {
+	// wait for http server to start
+	time.Sleep(500 * time.Millisecond)
+	// collect once at startup
+	r.collectHealth()
+	// wait for collection
+	time.Sleep(500 * time.Millisecond)
+
+	// remove self from other nodes
+	for i := range r.balancer.OtherNodes {
+		node := &r.balancer.OtherNodes[i]
+		if r.balancer.SelfNode.NodeID == node.NodeID {
+			r.balancer.OtherNodes = append(r.balancer.OtherNodes[:i], r.balancer.OtherNodes[i+1:]...)
+			break
+		}
+	}
+
+	r.balancer.SelfNode.Mu.Lock()
+	r.balancer.SelfNode.Status = cluster.SERVING
+	r.balancer.SelfNode.HealthInfo.UpTime = time.Now()
+	r.balancer.SelfNode.Mu.Unlock()
+
+	go func() {
+		for {
+			time.Sleep(time.Duration(3000+rand.Intn(2000)) * time.Millisecond) // 3-5秒ランダム待ち
+			r.collectHealth()
+		}
+	}()
+}
+
+func (r *Router) collectHealth() {
 	for i := range r.balancer.OtherNodes {
 		node := &r.balancer.OtherNodes[i]
 
@@ -81,6 +112,7 @@ func (r *Router) CollectHealth() {
 			}
 
 			node.Mu.Lock()
+			node.NodeID = requestedNodeInfo.NodeID
 			node.Status = requestedNodeInfo.Status
 			node.HealthInfo = requestedNodeInfo.HealthInfo
 			node.HealthInfo.CheckTime = time.Now()
@@ -95,11 +127,9 @@ func (r *Router) CollectHealth() {
 		_, openConns, idleConns, runningTx := r.txManager.Statistics(i)
 
 		ds := &selfNode.HealthInfo.Datasources[i]
-		//ds.Mu.Lock()
 		ds.OpenConns = openConns
 		ds.IdleConns = idleConns
 		ds.RunningTx = runningTx
-		//ds.Mu.Unlock()
 	}
 
 	selfNode.HealthInfo.CheckTime = time.Now()

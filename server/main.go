@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,21 +13,17 @@ import (
 	"smartdatastream/server/cluster"
 	"smartdatastream/server/rdb"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	NodeID          string              `yaml:"nodeId"`
-	NodePort        int                 `yaml:"nodePort"`
-	SecretKey       string              `yaml:"secretKey"`
-	MaxHttpSessions int                 `yaml:"maxHttpSessions"`
-	Cluster         []ClusterNodeConfig `yaml:"cluster"`
-	Datasources     []DatasourceConfig  `yaml:"datasources"`
-}
-
-type ClusterNodeConfig struct {
-	NodeID  string `yaml:"nodeId"`
-	BaseURL string `yaml:"baseUrl"`
+	NodeName        string             `yaml:"nodeName"`
+	NodePort        int                `yaml:"nodePort"`
+	SecretKey       string             `yaml:"secretKey"`
+	MaxHttpSessions int                `yaml:"maxHttpSessions"`
+	Datasources     []DatasourceConfig `yaml:"datasources"`
+	ClusterNodes    []string           `yaml:"clusterNodes"`
 }
 
 type DatasourceConfig struct {
@@ -59,6 +54,10 @@ func loadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
+func UUID() string {
+	return uuid.New().String()
+}
+
 func main() {
 	// Load configuration
 	configPath := "config.yaml"
@@ -76,6 +75,10 @@ func main() {
 	dsConfigs := make([]rdb.Config, len(config.Datasources))
 	hzDatasources := make([]cluster.DatasourceInfo, len(config.Datasources))
 	for i, ds := range config.Datasources {
+		if ds.Readonly {
+			ds.MaxTxConns = 0
+		}
+
 		dsConfigs[i] = rdb.Config{
 			DatasourceID:           ds.DatasourceID,
 			DatabaseName:           ds.DatabaseName,
@@ -112,7 +115,7 @@ func main() {
 	log.Printf("HTTP connection limit: %d", maxHttpSessions)
 
 	selfNode := &cluster.NodeInfo{
-		NodeID:    config.NodeID,
+		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, UUID()),
 		Status:    cluster.STARTING,
 		BaseURL:   "-",
 		SecretKey: config.SecretKey,
@@ -123,18 +126,14 @@ func main() {
 	}
 
 	// collect cluster health information
-	otherNodes := make([]cluster.NodeInfo, 0, len(config.Cluster))
-	for _, node := range config.Cluster {
-		if node.NodeID == config.NodeID {
-			continue
-		}
-		otherNodes = append(otherNodes, cluster.NodeInfo{
-			NodeID:  node.NodeID,
+	clusterNodes := make([]cluster.NodeInfo, 0, len(config.ClusterNodes))
+	for _, nodeURL := range config.ClusterNodes {
+		clusterNodes = append(clusterNodes, cluster.NodeInfo{
 			Status:  cluster.STARTING,
-			BaseURL: node.BaseURL,
+			BaseURL: nodeURL,
 		})
 	}
-	balancer := cluster.NewBalancer(selfNode, otherNodes)
+	balancer := cluster.NewBalancer(selfNode, clusterNodes)
 
 	// Create router
 	router := NewRouter(balancer, txManager)
@@ -153,20 +152,7 @@ func main() {
 		}
 	}()
 
-	// collect once at startup
-	router.CollectHealth()
-	time.Sleep(1000 * time.Millisecond) // wait for collection
-	selfNode.Mu.Lock()
-	selfNode.Status = cluster.SERVING
-	selfNode.HealthInfo.UpTime = time.Now()
-	selfNode.Mu.Unlock()
-
-	go func() {
-		for {
-			time.Sleep(time.Duration(3000+rand.Intn(2000)) * time.Millisecond) // 3-5秒ランダム待ち
-			router.CollectHealth()
-		}
-	}()
+	router.StartCollectHealthTicker()
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)

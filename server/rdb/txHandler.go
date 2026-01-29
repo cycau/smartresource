@@ -150,6 +150,37 @@ func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 
 // DoneTx handles /v1/rdb/tx/done/:requestId
 func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req TxIdRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
+		return
+	}
+
+	if req.TxID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "txId is required")
+		return
+	}
+
+	// Close transaction
+	err := tx.txManager.Close(req.TxID)
+	if err != nil {
+		if err == ErrTxNotFound {
+			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "CLOSE_ERROR", fmt.Sprintf("Failed to close transaction: %v", err))
+		return
+	}
+
+	// Write response
+	response := OkResponse{
+		OK: true,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (tx *TxHandler) parseRequest(r *http.Request) (int, BeginTxRequest, error) {

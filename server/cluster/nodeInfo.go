@@ -6,7 +6,7 @@ import (
 )
 
 type DatasourceInfo struct {
-	DatasourceID            string `json:"datasourceId"`
+	DatasourceID            string `json:"datasourceId"` // TODO: for pinpoint identification to execute
 	DatabaseName            string `json:"databaseName"`
 	Active                  bool   `json:"active"`
 	Readonly                bool   `json:"readonly"`
@@ -16,15 +16,14 @@ type DatasourceInfo struct {
 	DefaultQueryTimeoutSec  int    `json:"-"`
 	DefaultTxIdleTimeoutSec int    `json:"-"`
 
-	OpenConns    int     `json:"openConns"`
-	IdleConns    int     `json:"idleConns"`
-	WaitConns    int     `json:"waitConns"`
-	RunningSql   int     `json:"runningSql"`
-	RunningTx    int     `json:"runningTx"`
-	ErrorRate1m  float64 `json:"errorRate1m"`
-	Timeouts1m   int     `json:"timeouts1m"`
-	LatencyMs    int     `json:"latencyMs"`
-	LatencyP95Ms int     `json:"latencyP95Ms"`
+	OpenConns    int `json:"openConns"`
+	IdleConns    int `json:"idleConns"`
+	RunningSql   int `json:"runningSql"`
+	RunningTx    int `json:"runningTx"`
+	ErrorRate1m  int `json:"errorRate1m"`
+	Timeouts1m   int `json:"timeouts1m"`
+	LatencyMs    int `json:"latencyMs"`
+	LatencyP95Ms int `json:"latencyP95Ms"`
 }
 
 type HealthInfo struct {

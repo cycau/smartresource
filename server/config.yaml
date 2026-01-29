@@ -1,7 +1,12 @@
-nodeId: "dbapi-1"
+nodeName: "dbapi-1"
 nodePort: 5678
 maxHttpSessions: 1000
 secretKey: "change-me"
+
+clusterNodes:
+  - "http://localhost:5678"
+  - "http://localhost:5679"
+  - "http://localhost:5680"
 
 datasources:
   - datasourceId: pg_master
@@ -26,11 +31,3 @@ datasources:
     maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
     readonly: true
-
-cluster:
-  - nodeId: "dbapi-1"
-    baseUrl: "http://localhost:5678"
-  - nodeId: "dbapi-2"
-    baseUrl: "http://localhost:5678"
-  - nodeId: "dbapi-3"
-    baseUrl: "http://localhost:5678"
