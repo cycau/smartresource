@@ -38,7 +38,7 @@ type Datasource struct {
 
 // Initialize initializes datasources from configuration
 func NewDatasource(cfg Config) (*Datasource, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	driverName := cfg.Driver

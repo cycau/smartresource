@@ -131,9 +131,9 @@ func (ds *TxDatasource) closeEntry(entry *TxEntry) {
 
 	delete(ds.entries, entry.TxID)
 	ds.cond.Signal()
-	go entry.Conn.Close()
-
 	ds.mu.Unlock()
+
+	go entry.Conn.Close()
 }
 
 /************************************************************

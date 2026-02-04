@@ -19,13 +19,12 @@ type Balancer struct {
 
 // 定数定義
 const (
-	LAT_BAD_MS      = 3000.0 // 3秒を"かなり悪い"基準
-	ERR_RATE_BAD    = 0.05   // 1分5%をかなり悪い
-	TIMEOUT_BAD     = 20.0   // 1分20回timeoutをかなり悪い
-	WAIT_BAD        = 10.0
-	UPTIME_OK       = 300.0
-	TOP_K           = 3   // スコア上位TopK
-	USAGE_THRESHOLD = 0.8 // 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
+	LAT_BAD_MS       = 3000.0 // 3秒を"かなり悪い"基準
+	ERR_RATE_BAD     = 0.05   // 1分5%をかなり悪い
+	TIMEOUT_RATE_BAD = 0.05   // 1分5%をかなり悪い
+	UPTIME_OK        = 300.0  // サーバー起動から5分以上でOK
+	TOP_K            = 3      // スコア上位TopK
+	USAGE_THRESHOLD  = 0.8    // 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
 )
 
 type ENDPOINT_TYPE int
@@ -58,12 +57,15 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		}
 		secretKey := r.Header.Get("X-Secret-Key")
 		if secretKey != b.SelfNode.SecretKey {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte("Unauthorized"))
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		endpoint, tarDbName, txID, dsID := parseRequest(r)
+		err, endpoint, tarDbName, txID, dsID := parseRequest(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// 対象外のパスはそのまま処理
 		if endpoint == EP_Other {
@@ -71,19 +73,8 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			return
 		}
 
-		// トランザクション処理は常に受け入れる
-		if txID != "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// RunningHttp count
 		b.SelfNode.Mu.Lock()
-		if b.SelfNode.HealthInfo.RunningHttp >= b.SelfNode.HealthInfo.MaxHttpSessions {
-			b.SelfNode.Mu.Unlock()
-			http.Error(w, "Too many requests", http.StatusServiceUnavailable)
-			return
-		}
 		b.SelfNode.HealthInfo.RunningHttp++
 		b.SelfNode.Mu.Unlock()
 		defer func() {
@@ -91,6 +82,13 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			b.SelfNode.HealthInfo.RunningHttp--
 			b.SelfNode.Mu.Unlock()
 		}()
+
+		// トランザクション処理は常に受け入れる（優先処理）
+		if txID != "" {
+			b.SelfNode.Mu.Unlock()
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		// Datasource指定がある場合はそのまま処理
 		if dsID != "" {
@@ -111,18 +109,18 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
 		// Weight抽選で、自分のScoreの方が高い場合は自分で処理
 		// それ以外はredirect、Max３回か、自分にリダイレクトされた場合は終了（Client側実装）
-		selfBestScore, selfBestRandomDs := selectSelfDatasource(&selfNode, tarDbName, endpoint)
-		if selfBestRandomDs != nil {
+		selfBestScore, selfRecommendDs := selectSelfDatasource(&selfNode, tarDbName, endpoint)
+		if selfRecommendDs != nil {
 			// add to context
-			ctx := context.WithValue(r.Context(), "$S_IDX", selfBestRandomDs.index)
+			ctx := context.WithValue(r.Context(), "$S_IDX", selfRecommendDs.index)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		// 他のノード選択
-		selectedNodeScore, selectedNode := selectOtherDatasource(&b.OtherNodes, tarDbName, endpoint)
+		recommendNodeScore, recommendNode := selectOtherDatasource(&b.OtherNodes, tarDbName, endpoint)
 
-		if selectedNodeScore == nil {
+		if recommendNodeScore == nil {
 			// 自分にはまだ捌ける余地がある場合は自分で処理
 			if selfBestScore.score > 0 {
 				ctx := context.WithValue(r.Context(), "$S_IDX", selfBestScore.index)
@@ -135,7 +133,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		}
 
 		// 自分のScoreの方が高い場合は自分で処理
-		if selfBestScore.score > selectedNodeScore.score {
+		if selfBestScore.score > recommendNodeScore.score {
 			// さらに他ノードBestScoreとの比較はやめる、一瞬他ノードに集中させてしまう恐れあり
 			ctx := context.WithValue(r.Context(), "$S_IDX", selfBestScore.index)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -143,15 +141,18 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		}
 
 		// 307 Temporary Redirect
-		w.Header().Set("Location", selectedNode.NodeID)
+		w.Header().Set("Location", recommendNode.NodeID)
 		w.WriteHeader(http.StatusTemporaryRedirect)
-		fmt.Fprintf(w, "Redirecting to Node[%s] [%f -> %f]\n", selectedNode.NodeID, selfBestScore.score, selectedNodeScore.score)
+		fmt.Fprintf(w, "Redirecting to Node[%s] [%f -> %f]\n", recommendNode.NodeID, selfBestScore.score, recommendNodeScore.score)
 	}
 	return http.HandlerFunc(fn)
 }
 
-func selectSelfDatasource(node *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *scoreWithWeight, bestRandomScore *scoreWithWeight) {
+func selectSelfDatasource(node *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *scoreWithWeight, recommendScore *scoreWithWeight) {
 	if node.Status != SERVING {
+		return nil, nil
+	}
+	if node.HealthInfo.RunningHttp >= node.HealthInfo.MaxHttpQueue {
 		return nil, nil
 	}
 
@@ -189,7 +190,7 @@ func selectSelfDatasource(node *NodeInfo, tarDbName string, endpoint ENDPOINT_TY
 	}
 
 	// 使用率80%以上なら、他のノードとの協調を試みる
-	if float64(node.HealthInfo.RunningHttp)/float64(node.HealthInfo.MaxHttpSessions) >= USAGE_THRESHOLD {
+	if float64(node.HealthInfo.RunningHttp)/float64(node.HealthInfo.MaxHttpQueue) >= USAGE_THRESHOLD {
 		return best, nil
 	}
 
@@ -207,7 +208,7 @@ func selectSelfDatasource(node *NodeInfo, tarDbName string, endpoint ENDPOINT_TY
 	return best, bestRandom
 }
 
-func selectOtherDatasource(nodes *[]NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (selectedNodeScore *scoreWithWeight, selectedNode *NodeInfo) {
+func selectOtherDatasource(nodes *[]NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (recommendNodeScore *scoreWithWeight, recommendNode *NodeInfo) {
 	totalDatasources := 0
 	otherNodes := make([]NodeInfo, len(*nodes))
 	for i := range *nodes {
@@ -331,7 +332,7 @@ type normalizedMetrics struct {
 func calculateMetrics(node *NodeInfo, dsIdx int) normalizedMetrics {
 	dsInfo := &node.HealthInfo.Datasources[dsIdx]
 
-	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpSessions)
+	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpQueue)
 	dbUsage := float64(dsInfo.RunningSql) / float64(dsInfo.MaxOpenConns)
 	txUsage := 1.0
 	if dsInfo.MaxTxConns > 0 {
@@ -345,8 +346,8 @@ func calculateMetrics(node *NodeInfo, dsIdx int) normalizedMetrics {
 
 	// 品質指標の正規化
 	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
-	errScore := 1 - clamp01(float64(dsInfo.ErrorRate1m)/ERR_RATE_BAD)
-	toutScore := 1 - clamp01(float64(dsInfo.Timeouts1m)/TIMEOUT_BAD)
+	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_RATE_BAD)
+	toutScore := 1 - clamp01(dsInfo.TimeoutRate1m/TIMEOUT_RATE_BAD)
 
 	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
 
@@ -414,24 +415,35 @@ type scoreWithWeight struct {
 }
 
 // parse request and return endpoint, database name, and transaction ID
-func parseRequest(r *http.Request) (endpoint ENDPOINT_TYPE, dbName string, txID string, dsIDX string) {
+func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName string, txID string, dsIDX string) {
 
 	path := r.URL.Path
-	if strings.HasSuffix(path, "/query") {
-		endpoint = EP_Query
-	} else if strings.HasSuffix(path, "/execute") {
-		endpoint = EP_Execute
-	} else if strings.HasSuffix(path, "/tx/begin") {
-		endpoint = EP_BeginTx
-	} else {
-		endpoint = EP_Other
-	}
-
 	query := r.URL.Query()
-
 	dbName = query.Get("_DbName")
 	txID = query.Get("_TxID")
 	dsIDX = query.Get("_DsIDX")
 
-	return endpoint, dbName, txID, dsIDX
+	if strings.HasSuffix(path, "/query") {
+		endpoint = EP_Query
+		if dbName == "" || txID == "" || dsIDX == "" {
+			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsIDX ]"), endpoint, dbName, txID, dsIDX
+		}
+	} else if strings.HasSuffix(path, "/execute") {
+		endpoint = EP_Execute
+		if dbName == "" || txID == "" || dsIDX == "" {
+			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsIDX ]"), endpoint, dbName, txID, dsIDX
+		}
+	} else if strings.HasSuffix(path, "/tx/begin") {
+		endpoint = EP_BeginTx
+		if dbName == "" || dsIDX == "" {
+			return fmt.Errorf("require query parameters [ _DbName ] [ _DsIDX ]"), endpoint, dbName, txID, dsIDX
+		}
+	} else {
+		endpoint = EP_Other
+		if txID == "" {
+			return fmt.Errorf("require query parameter [ _TxID ]"), endpoint, dbName, txID, dsIDX
+		}
+	}
+
+	return nil, endpoint, dbName, txID, dsIDX
 }

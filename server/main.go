@@ -14,16 +14,22 @@ import (
 	"smartdatastream/server/rdb"
 
 	"github.com/google/uuid"
+	"github.com/paulbellamy/ratecounter"
+	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	STAT_INTERVAL = 5 * time.Minute
+)
+
 type Config struct {
-	NodeName        string             `yaml:"nodeName"`
-	NodePort        int                `yaml:"nodePort"`
-	SecretKey       string             `yaml:"secretKey"`
-	MaxHttpSessions int                `yaml:"maxHttpSessions"`
-	Datasources     []DatasourceConfig `yaml:"datasources"`
-	ClusterNodes    []string           `yaml:"clusterNodes"`
+	NodeName     string             `yaml:"nodeName"`
+	NodePort     int                `yaml:"nodePort"`
+	SecretKey    string             `yaml:"secretKey"`
+	MaxHttpQueue int                `yaml:"maxHttpQueue"`
+	Datasources  []DatasourceConfig `yaml:"datasources"`
+	ClusterNodes []string           `yaml:"clusterNodes"`
 }
 
 type DatasourceConfig struct {
@@ -93,6 +99,11 @@ func main() {
 			Readonly:               ds.Readonly,
 		}
 
+		var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+			Objectives: map[float64]float64{0.95: 0.01},
+			MaxAge:     STAT_INTERVAL,
+		}, []string{"stat"})
+
 		hzDatasources[i] = cluster.DatasourceInfo{
 			DatasourceID: ds.DatasourceID,
 			DatabaseName: ds.DatabaseName,
@@ -101,18 +112,22 @@ func main() {
 			MaxOpenConns: ds.MaxOpenConns,
 			MinIdleConns: ds.MinIdleConns,
 			MaxTxConns:   ds.MaxTxConns,
+			StatLatency:  statLatency,
+			StatTotal:    ratecounter.NewRateCounter(STAT_INTERVAL),
+			StatErrors:   ratecounter.NewRateCounter(STAT_INTERVAL),
+			StatTimeouts: ratecounter.NewRateCounter(STAT_INTERVAL),
 		}
 	}
 
 	// Initialize TxManager
 	txManager := rdb.NewTxManager(dsConfigs)
 
-	// Set maxHttpSessions for HTTP connection limiting
-	maxHttpSessions := config.MaxHttpSessions
-	if maxHttpSessions <= 0 {
-		maxHttpSessions = 1000 // default
+	// Set maxHttpQueue for HTTP connection limiting
+	maxHttpQueue := config.MaxHttpQueue
+	if maxHttpQueue <= 0 {
+		maxHttpQueue = 1000 // default
 	}
-	log.Printf("HTTP connection limit: %d", maxHttpSessions)
+	log.Printf("HTTP connection limit: %d", maxHttpQueue)
 
 	selfNode := &cluster.NodeInfo{
 		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, UUID()),
@@ -120,8 +135,8 @@ func main() {
 		BaseURL:   "-",
 		SecretKey: config.SecretKey,
 		HealthInfo: cluster.HealthInfo{
-			MaxHttpSessions: config.MaxHttpSessions,
-			Datasources:     hzDatasources,
+			MaxHttpQueue: maxHttpQueue,
+			Datasources:  hzDatasources,
 		},
 	}
 

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -45,9 +46,7 @@ func (r *Router) StartCollectHealthTicker() {
 	// wait for http server to start
 	time.Sleep(500 * time.Millisecond)
 	// collect once at startup
-	r.collectHealth()
-	// wait for collection
-	time.Sleep(500 * time.Millisecond)
+	r.collectHealth(true)
 
 	// remove self from other nodes
 	for i := range r.balancer.OtherNodes {
@@ -66,19 +65,23 @@ func (r *Router) StartCollectHealthTicker() {
 	go func() {
 		for {
 			time.Sleep(time.Duration(3000+rand.Intn(2000)) * time.Millisecond) // 3-5秒ランダム待ち
-			r.collectHealth()
+			r.collectHealth(false)
 		}
 	}()
 }
 
-func (r *Router) collectHealth() {
+func (r *Router) collectHealth(isSync bool) {
+	var wg sync.WaitGroup
+
 	for i := range r.balancer.OtherNodes {
 		node := &r.balancer.OtherNodes[i]
 
+		wg.Add(1)
 		go func(node *cluster.NodeInfo) {
+			defer wg.Done()
 			defer node.Mu.Unlock()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.BaseURL+"/healz", nil)
 			if err != nil {
@@ -102,8 +105,8 @@ func (r *Router) collectHealth() {
 				node.Status = cluster.HEALZERR
 				return
 			}
-			var requestedNodeInfo cluster.NodeInfo
-			err = json.Unmarshal(body, &requestedNodeInfo)
+			var responsedNodeInfo cluster.NodeInfo
+			err = json.Unmarshal(body, &responsedNodeInfo)
 			if err != nil {
 				log.Printf("Failed to unmarshal health info from %s: %v", node.NodeID, err)
 				node.Mu.Lock()
@@ -112,11 +115,15 @@ func (r *Router) collectHealth() {
 			}
 
 			node.Mu.Lock()
-			node.NodeID = requestedNodeInfo.NodeID
-			node.Status = requestedNodeInfo.Status
-			node.HealthInfo = requestedNodeInfo.HealthInfo
+			node.NodeID = responsedNodeInfo.NodeID
+			node.Status = responsedNodeInfo.Status
+			node.HealthInfo = responsedNodeInfo.HealthInfo
 			node.HealthInfo.CheckTime = time.Now()
 		}(node)
+	}
+
+	if isSync {
+		wg.Wait()
 	}
 
 	selfNode := r.balancer.SelfNode

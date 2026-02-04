@@ -326,18 +326,7 @@ func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, is
 	// Find or create datasource info
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
 
-	// Update latency
-	dsInfo.LatencyMs = int(latencyMs)
-
-	// Update error rate and timeout count (simplified: track last minute)
-	// Note: For production, you'd want a proper time-windowed tracking mechanism
-	if isError {
-		if isTimeout {
-			dsInfo.Timeouts1m++
-		}
-		// Simple error rate calculation (would need proper time-windowed tracking)
-		// For now, we'll just increment a counter that gets reset periodically
-	}
+	dsInfo.StatisticsResult(latencyMs, isError, isTimeout)
 
 	exec.selfNode.Mu.Unlock()
 }
