@@ -130,7 +130,7 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 
 	for dsIdx := range selfNode.HealthInfo.Datasources {
 
-		score := selfNode.CalculateScore(dsIdx, tarDbName, endpoint)
+		score := selfNode.GetScore(dsIdx, tarDbName, endpoint)
 		if score == nil {
 			continue
 		}
@@ -165,15 +165,14 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 }
 
 func selectOtherNode(otherNodes []NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (recommendNodeScore *ScoreWithWeight, recommendNode *NodeInfo) {
-	// スコア計算
 	scores := make([]*ScoreWithWeight, 0, 255)
+
 	for nodeIdx := range otherNodes {
 		node := &otherNodes[nodeIdx]
 		node.Mu.RLock()
 
 		for dsIdx := range node.HealthInfo.Datasources {
-			// スコア計算
-			score := node.CalculateScore(dsIdx, tarDbName, endpoint)
+			score := node.GetScore(dsIdx, tarDbName, endpoint)
 			if score == nil {
 				continue
 			}

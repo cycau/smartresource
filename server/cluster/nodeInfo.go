@@ -22,13 +22,10 @@ type DatasourceInfo struct {
 	MinIdleConns int    `json:"minIdleConns"`
 	MaxTxConns   int    `json:"maxTxConns"`
 
-	OpenConns     int     `json:"openConns"`
-	IdleConns     int     `json:"idleConns"`
-	RunningQuery  int     `json:"runningQuery"`
-	RunningTx     int     `json:"runningTx"`
-	LatencyP95Ms  int     `json:"latencyP95Ms"`
-	ErrorRate1m   float64 `json:"errorRate1m"`
-	TimeoutRate1m float64 `json:"timeoutRate1m"`
+	OpenConns    int `json:"openConns"`
+	IdleConns    int `json:"idleConns"`
+	RunningQuery int `json:"runningQuery"`
+	RunningTx    int `json:"runningTx"`
 
 	StatLatency  *prometheus.SummaryVec   `json:"-"`
 	StatTotal    *ratecounter.RateCounter `json:"-"`
@@ -83,29 +80,7 @@ func (node *NodeInfo) Clone() NodeInfo {
 	defer node.Mu.RUnlock()
 
 	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
-	for idx, ds := range node.HealthInfo.Datasources {
-		latency95 := &dto.Metric{}
-		ds.StatLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency95)
-		p95 := latency95.GetSummary().GetQuantile()[0].GetValue()
-		if math.IsNaN(p95) {
-			p95 = 16.0
-		}
-		ds.LatencyP95Ms = int(p95)
-
-		total := float64(ds.StatTotal.Rate())
-		errCnt := float64(ds.StatErrors.Rate())
-		toutCnt := float64(ds.StatTimeouts.Rate())
-
-		if total == 0 {
-			ds.ErrorRate1m = 0
-			ds.TimeoutRate1m = 0
-		} else {
-			ds.ErrorRate1m = errCnt / total
-			ds.TimeoutRate1m = toutCnt / total
-		}
-
-		datasources[idx] = ds
-	}
+	copy(datasources, node.HealthInfo.Datasources)
 
 	return NodeInfo{
 		NodeID:    node.NodeID,
@@ -163,6 +138,7 @@ type ScoreWithWeight struct {
 	exIndex int
 }
 
+// エンドポイントタイプ取得
 func GetEndpointType(path string) ENDPOINT_TYPE {
 
 	if strings.HasSuffix(path, EP_PATH_QUERY) {
@@ -178,8 +154,13 @@ func GetEndpointType(path string) ENDPOINT_TYPE {
 	return EP_Other
 }
 
+// clamp01 0〜1にクランプ
+func clamp01(x float64) float64 {
+	return math.Min(1.0, math.Max(0.0, x))
+}
+
 // スコア計算
-func (node *NodeInfo) CalculateScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
+func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
 
 	if node.Status != SERVING {
 		return nil
@@ -231,13 +212,27 @@ func calculateMetrics(node *NodeInfo, dsInfo DatasourceInfo) normalizedMetrics {
 	dbFree := 1 - clamp01(dbUsage)
 	txFree := 1 - clamp01(txUsage)
 	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.OpenConns))
+	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
 
 	// 品質指標の正規化
-	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
-	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_RATE_BAD)
-	toutScore := 1 - clamp01(dsInfo.TimeoutRate1m/TIMEOUT_RATE_BAD)
+	latency95 := &dto.Metric{}
+	dsInfo.StatLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency95)
+	p95 := latency95.GetSummary().GetQuantile()[0].GetValue()
+	if math.IsNaN(p95) {
+		p95 = 16.0
+	}
 
-	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
+	errorRate1m := 0.0
+	timeoutRate1m := 0.0
+	total := float64(dsInfo.StatTotal.Rate())
+	if total > 0 {
+		errorRate1m = float64(dsInfo.StatErrors.Rate()) / total
+		timeoutRate1m = float64(dsInfo.StatTimeouts.Rate()) / total
+	}
+
+	latScore := 1 - clamp01(math.Log1p(float64(p95))/math.Log1p(LAT_BAD_MS))
+	errScore := 1 - clamp01(errorRate1m/ERR_RATE_BAD)
+	toutScore := 1 - clamp01(timeoutRate1m/TIMEOUT_RATE_BAD)
 
 	return normalizedMetrics{
 		httpFree:    httpFree,
@@ -293,10 +288,6 @@ func calculateScore(endpoint ENDPOINT_TYPE, m normalizedMetrics) float64 {
 
 			0.03*m.uptimeScore
 	}
-	return s
-}
 
-// clamp01 0〜1にクランプ
-func clamp01(x float64) float64 {
-	return math.Min(1.0, math.Max(0.0, x))
+	return s
 }
