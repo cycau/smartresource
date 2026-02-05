@@ -1,12 +1,12 @@
 nodeName: "dbapi-1"
 nodePort: 5678
 maxHttpQueue: 1000
-secretKey: "change-me"
+secretKey: "secret-key"
 
 clusterNodes:
   - "http://localhost:5678"
-  - "http://localhost:5679"
-  - "http://localhost:5680"
+  - "http://localhost:5678"
+  - "http://localhost:5678"
 
 datasources:
   - datasourceId: pg_master

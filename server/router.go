@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"smartdatastream/server/cluster"
+	. "smartdatastream/server/global"
 	"smartdatastream/server/rdb"
 )
 
@@ -159,16 +160,14 @@ func (r *Router) setupRoutes() {
 	r.Route("/rdb", func(router chi.Router) {
 		// Execute endpoint
 		execHandler := rdb.NewExecHandler(r.balancer.SelfNode, r.txManager)
-		router.Post("/query", execHandler.Query)
-		router.Post("/execute", execHandler.Execute)
+		router.Post(EP_PATH_QUERY, execHandler.Query)
+		router.Post(EP_PATH_EXECUTE, execHandler.Execute)
 
 		// Transaction endpoints
 		txHandler := rdb.NewTxHandler(r.balancer.SelfNode, r.txManager)
-		router.Route("/tx", func(txRouter chi.Router) {
-			txRouter.Post("/begin", txHandler.BeginTx)
-			txRouter.Post("/commit", txHandler.CommitTx)
-			txRouter.Post("/rollback", txHandler.RollbackTx)
-			txRouter.Post("/done", txHandler.DoneTx)
-		})
+		router.Post(EP_PATH_BEGIN_TX, txHandler.BeginTx)
+		router.Put(EP_PATH_COMMIT_TX, txHandler.CommitTx)
+		router.Put(EP_PATH_ROLLBACK_TX, txHandler.RollbackTx)
+		router.Put(EP_PATH_DONE_TX, txHandler.DoneTx)
 	})
 }

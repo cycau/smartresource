@@ -1,0 +1,9 @@
+{
+  "SQL": "SELECT * FROM sys_users WHERE user_id = $1",
+  "Params": [
+    {
+        "Type": "STRING",
+        "Value": "XXX"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "SQL": "UPDATE sys_users SET phone_number = $2 WHERE user_id = $1",
+  "Params": [
+    {
+        "Type": "STRING",
+        "Value": "XXX"
+    },
+    {
+        "Type": "STRING",
+        "Value": "080-1234-5678"
+    }
+  ]
+}

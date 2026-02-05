@@ -6,9 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"smartdatastream/server/cluster"
 	"time"
+
+	. "smartdatastream/server/global"
 
 	"github.com/shopspring/decimal"
 )
@@ -17,7 +20,6 @@ import (
 type ExecuteRequest struct {
 	SQL        string       `json:"sql"`
 	Params     []ParamValue `json:"params,omitempty"`
-	TxID       *string      `json:"txId,omitempty"`
 	TimeoutSec *int         `json:"timeoutSec,omitempty"`
 	LimitRows  *int         `json:"limitRows,omitempty"`
 }
@@ -48,15 +50,15 @@ type ParamValue struct {
 
 // ExecuteResponse represents the response for /v1/rdb/execute
 type QueryResponse struct {
-	ColumnMeta      []ColumnMeta `json:"columnMeta,omitempty"`
-	Rows            []any        `json:"rows"`
-	TotalCount      int          `json:"totalCount"`
-	ExecutionTimeMs int64        `json:"executionTimeMs"`
+	ColumnMeta    []ColumnMeta `json:"columnMeta,omitempty"`
+	Rows          []any        `json:"rows"`
+	TotalCount    int          `json:"totalCount"`
+	ElapsedTimeMs int64        `json:"elapsedTimeMs"`
 }
 
 type ExecuteResponse struct {
-	EffectedRows    int64 `json:"effectedRows"`
-	ExecutionTimeMs int64 `json:"executionTimeMs"`
+	EffectedRows  int64 `json:"effectedRows"`
+	ElapsedTimeMs int64 `json:"elapsedTimeMs"`
 }
 
 // ColumnMeta contains metadata about a column
@@ -85,11 +87,12 @@ func NewExecHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *ExecHandl
 func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	dsIDX, req, parameters, err := exec.parseRequest(r)
+	dsIDX, req, parameters, txID, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
+	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
 	// Update health info: increment RunningSql
 	exec.statisticsRequest(dsIDX, 1)
@@ -99,7 +102,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	var releaseResource releaseResourceFunc
 	var queryErr error
 
-	if req.TxID == nil {
+	if txID == "" {
 		// Execute query without transaction
 		rows, releaseResource, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		defer releaseResource()
@@ -116,7 +119,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 	} else {
 		// Execute query in transaction
-		rows, releaseResource, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		rows, releaseResource, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
 		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
@@ -217,17 +220,17 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Calculate execution time
-	executionTimeMs := time.Since(startTime).Milliseconds()
+	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful query
-	exec.statisticsResult(dsIDX, executionTimeMs, false, false)
+	exec.statisticsResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := QueryResponse{
-		ColumnMeta:      columnMeta,
-		Rows:            resultRows,
-		TotalCount:      rowCount,
-		ExecutionTimeMs: executionTimeMs,
+		ColumnMeta:    columnMeta,
+		Rows:          resultRows,
+		TotalCount:    rowCount,
+		ElapsedTimeMs: elapsedTimeMs,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -238,11 +241,12 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	dsIDX, req, parameters, err := exec.parseRequest(r)
+	dsIDX, req, parameters, txID, err := exec.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
+	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
 	// Update health info: increment RunningSql
 	exec.statisticsRequest(dsIDX, 1)
@@ -251,7 +255,8 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	var result sql.Result
 	var releaseResource releaseResourceFunc
 	var execErr error
-	if req.TxID == nil {
+
+	if txID == "" {
 		// Get database
 		result, releaseResource, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		defer releaseResource()
@@ -267,7 +272,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Execute in transaction
-		result, releaseResource, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, *req.TxID, req.SQL, parameters...)
+		result, releaseResource, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
 		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
@@ -289,15 +294,15 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Calculate execution time
-	executionTimeMs := time.Since(startTime).Milliseconds()
+	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful execution
-	exec.statisticsResult(dsIDX, executionTimeMs, false, false)
+	exec.statisticsResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := ExecuteResponse{
-		EffectedRows:    affectedRows,
-		ExecutionTimeMs: executionTimeMs,
+		EffectedRows:  affectedRows,
+		ElapsedTimeMs: elapsedTimeMs,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -312,9 +317,9 @@ func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
 	exec.selfNode.Mu.Lock()
 
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
-	dsInfo.RunningSql += delta
-	if dsInfo.RunningSql < 0 {
-		dsInfo.RunningSql = 0
+	dsInfo.RunningQuery += delta
+	if dsInfo.RunningQuery < 0 {
+		dsInfo.RunningQuery = 0
 	}
 
 	exec.selfNode.Mu.Unlock()
@@ -349,30 +354,36 @@ Body:
 		"limitRows": 1000
 	}
 */
-func (exec *ExecHandler) parseRequest(r *http.Request) (int, ExecuteRequest, []any, error) {
+func (exec *ExecHandler) parseRequest(r *http.Request) (dsIDX int, request ExecuteRequest, params []any, txID string, err error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to parse request: %w", err)
+		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("failed to parse request: %w", err)
 	}
 
+	if req.SQL == "" {
+		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("SQL is required")
+	}
+
+	txID = r.URL.Query().Get(QUERYP_TX_ID)
 	// get datasourceId from context
-	dsIDX, ok := r.Context().Value("$S_IDX").(int)
-	if !ok {
-		return -1, ExecuteRequest{}, nil, fmt.Errorf("Datasource INDEX hasn't decided")
+	dsIDX, ok := GetCtxDsIdx(r)
+	if !ok && txID == "" {
+		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("Datasource INDEX hasn't decided")
 	}
 
 	// Convert params
 	parameters, err := convertParams(req.Params)
 	if err != nil {
-		return -1, ExecuteRequest{}, nil, fmt.Errorf("failed to convert params: %w", err)
+		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("failed to convert params: %w", err)
 	}
 
-	return dsIDX, req, parameters, nil
+	return dsIDX, req, parameters, txID, nil
 }
 
 func convertParams(params []ParamValue) ([]any, error) {
 	args := make([]any, len(params))
 	for i, p := range params {
+		log.Printf("Converting Param[%d]: %+v", i, p)
 		arg, err := convertParam(p)
 		if err != nil {
 			return nil, fmt.Errorf("param[%d]: %w", i, err)

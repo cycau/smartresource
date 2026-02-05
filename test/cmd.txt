@@ -1,0 +1,15 @@
+curl -X GET http://localhost:5678/healz | jq .
+
+
+curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@query.data.txt" http://localhost:5678/rdb/query?_DbName=crm-system | jq .
+
+curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@exec.data.txt" http://localhost:5678/rdb/execute?_DbName=crm-system | jq .
+
+
+curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@begin.data2.txt" ^
+  http://localhost:5678/rdb/tx/begin?_DbName=crm-system | jq .
+curl http://localhost:5678/rdb/tx/begin?_DbName=crm-system -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@begin.data2.txt" ^
+| jq .
+
+curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@query.data.txt" ^
+  http://localhost:5678/rdb/query?_TxID=aYQ7eMb6xq8AAiak9nid | jq .

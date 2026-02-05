@@ -13,6 +13,8 @@ import (
 	"smartdatastream/server/cluster"
 	"smartdatastream/server/rdb"
 
+	gonanoid "github.com/matoous/go-nanoid/v2"
+
 	"github.com/google/uuid"
 	"github.com/paulbellamy/ratecounter"
 	"github.com/prometheus/client_golang/prometheus"
@@ -129,8 +131,9 @@ func main() {
 	}
 	log.Printf("HTTP connection limit: %d", maxHttpQueue)
 
+	nodeId, _ := gonanoid.New(9)
 	selfNode := &cluster.NodeInfo{
-		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, UUID()),
+		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, nodeId),
 		Status:    cluster.STARTING,
 		BaseURL:   "-",
 		SecretKey: config.SecretKey,

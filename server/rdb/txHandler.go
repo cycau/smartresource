@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"smartdatastream/server/cluster"
+	. "smartdatastream/server/global"
 	"time"
 )
 
@@ -49,7 +50,7 @@ func NewTxHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *TxHandler {
 
 // BeginTx handles /v1/rdb/tx/begin
 func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
-	dsIDX, req, err := tx.parseRequest(r)
+	dsIDX, req, err := tx.parseBeginRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
@@ -80,20 +81,15 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 
 // CommitTx handles /v1/rdb/tx/commit
 func (tx *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req TxIdRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
-		return
-	}
+	txID := getTxID(r)
 
-	if req.TxID == "" {
+	if txID == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "txId is required")
 		return
 	}
 
 	// Commit transaction
-	err := tx.txManager.Commit(req.TxID)
+	err := tx.txManager.Commit(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -115,20 +111,15 @@ func (tx *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 
 // RollbackTx handles /v1/rdb/tx/rollback
 func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req TxIdRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
-		return
-	}
+	txID := getTxID(r)
 
-	if req.TxID == "" {
+	if txID == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "txId is required")
 		return
 	}
 
 	// Rollback transaction
-	err := tx.txManager.Rollback(req.TxID)
+	err := tx.txManager.Rollback(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -150,20 +141,15 @@ func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 
 // DoneTx handles /v1/rdb/tx/done/:requestId
 func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req TxIdRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
-		return
-	}
+	txID := getTxID(r)
 
-	if req.TxID == "" {
+	if txID == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "txId is required")
 		return
 	}
 
 	// Close transaction
-	err := tx.txManager.Close(req.TxID)
+	err := tx.txManager.Close(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -183,14 +169,14 @@ func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (tx *TxHandler) parseRequest(r *http.Request) (int, BeginTxRequest, error) {
+func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, error) {
 	var req BeginTxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return -1, BeginTxRequest{}, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// get datasourceId from context
-	dsIDX, ok := r.Context().Value("$S_IDX").(int)
+	dsIDX, ok := GetCtxDsIdx(r)
 	if !ok {
 		return -1, BeginTxRequest{}, fmt.Errorf("datasource INDEX is required")
 	}
@@ -199,4 +185,8 @@ func (tx *TxHandler) parseRequest(r *http.Request) (int, BeginTxRequest, error) 
 	}
 
 	return dsIDX, req, nil
+}
+
+func getTxID(r *http.Request) string {
+	return r.URL.Query().Get(QUERYP_TX_ID)
 }
