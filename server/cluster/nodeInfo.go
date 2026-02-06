@@ -314,35 +314,38 @@ func calculateScore(endpoint ENDPOINT_TYPE, m normalizedMetrics) float64 {
 
 	switch endpoint {
 	case EP_Query:
-		s = 0.25*m.dbFree +
+		s = 0.25*m.httpFree +
+
+			0.25*m.dbFree +
 			0.00*m.txFree +
-			0.20*m.httpFree +
 			0.12*m.idleScore +
 
 			0.20*m.latScore +
-			0.12*m.errScore +
+			0.07*m.errScore +
 			0.08*m.toutScore +
 
 			0.03*m.uptimeScore
 	case EP_Execute:
-		s = 0.25*m.dbFree +
-			0.05*m.txFree +
-			0.15*m.httpFree +
+		s = 0.15*m.httpFree +
+
+			0.25*m.dbFree +
+			0.10*m.txFree +
 			0.12*m.idleScore +
 
 			0.10*m.latScore +
 			0.15*m.errScore +
-			0.15*m.toutScore +
+			0.10*m.toutScore +
 
 			0.03*m.uptimeScore
 	case EP_BeginTx:
-		s = 0.25*m.dbFree +
-			0.25*m.txFree +
-			0.10*m.httpFree +
+		s = 0.10*m.httpFree +
+
+			0.20*m.dbFree +
+			0.20*m.txFree +
 			0.12*m.idleScore +
 
 			0.05*m.latScore +
-			0.20*m.errScore +
+			0.15*m.errScore +
 			0.15*m.toutScore +
 
 			0.03*m.uptimeScore
