@@ -12,7 +12,7 @@ myDatasources:
   - datasourceId: pg_master
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://user:password@localhost:25432/incident_manager"
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 100
     maxIdleConns: 10
     maxConnLifetimeSec: 1800
@@ -23,7 +23,7 @@ myDatasources:
   - datasourceId: pg_slave01
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://user:password@localhost:25432/incident_manager"
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 100
     maxIdleConns: 10
     maxConnLifetimeSec: 1800

@@ -54,9 +54,9 @@ func runServer(config global.Config) {
 	}
 
 	// collect cluster health information
-	clusterNodes := make([]cluster.NodeInfo, 0, len(config.ClusterNodes))
+	clusterNodes := make([]*cluster.NodeInfo, 0, len(config.ClusterNodes))
 	for _, nodeURL := range config.ClusterNodes {
-		clusterNodes = append(clusterNodes, cluster.NodeInfo{
+		clusterNodes = append(clusterNodes, &cluster.NodeInfo{
 			Status:  cluster.STARTING,
 			BaseURL: nodeURL,
 		})

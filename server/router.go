@@ -50,13 +50,13 @@ func (r *Router) StartCollectHealthTicker() {
 	r.collectHealth(true)
 
 	// remove self from other nodes
-	for i := range r.balancer.OtherNodes {
-		node := &r.balancer.OtherNodes[i]
-		if r.balancer.SelfNode.NodeID == node.NodeID {
-			r.balancer.OtherNodes = append(r.balancer.OtherNodes[:i], r.balancer.OtherNodes[i+1:]...)
-			break
+	otherNodes := make([]*cluster.NodeInfo, 0, len(r.balancer.OtherNodes))
+	for _, node := range r.balancer.OtherNodes {
+		if r.balancer.SelfNode.NodeID != node.NodeID {
+			otherNodes = append(otherNodes, node)
 		}
 	}
+	r.balancer.OtherNodes = otherNodes
 
 	r.balancer.SelfNode.Mu.Lock()
 	r.balancer.SelfNode.Status = cluster.SERVING
@@ -74,9 +74,7 @@ func (r *Router) StartCollectHealthTicker() {
 func (r *Router) collectHealth(isSync bool) {
 	var wg sync.WaitGroup
 
-	for i := range r.balancer.OtherNodes {
-		node := &r.balancer.OtherNodes[i]
-
+	for _, node := range r.balancer.OtherNodes {
 		wg.Add(1)
 		go func(node *cluster.NodeInfo) {
 			defer wg.Done()

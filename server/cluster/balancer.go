@@ -12,13 +12,13 @@ import (
 
 type Balancer struct {
 	SelfNode   *NodeInfo
-	OtherNodes []NodeInfo
+	OtherNodes []*NodeInfo
 }
 
 /*****************************
  * initialize Balancer
  *****************************/
-func NewBalancer(selfNode *NodeInfo, otherNodes []NodeInfo) *Balancer {
+func NewBalancer(selfNode *NodeInfo, otherNodes []*NodeInfo) *Balancer {
 	return &Balancer{
 		SelfNode:   selfNode,
 		OtherNodes: otherNodes,
@@ -164,11 +164,10 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 	return best, bestRandom
 }
 
-func selectOtherNode(otherNodes []NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (recommendNodeScore *ScoreWithWeight, recommendNode *NodeInfo) {
+func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (recommendNodeScore *ScoreWithWeight, recommendNode *NodeInfo) {
 	scores := make([]*ScoreWithWeight, 0, 255)
 
-	for nodeIdx := range otherNodes {
-		node := &otherNodes[nodeIdx]
+	for nodeIdx, node := range otherNodes {
 		node.Mu.RLock()
 
 		for dsIdx := range node.HealthInfo.Datasources {
@@ -187,7 +186,7 @@ func selectOtherNode(otherNodes []NodeInfo, tarDbName string, endpoint ENDPOINT_
 	// ノード選択
 	_, bestRandomScore := selectBestRandomScore(scores)
 	if bestRandomScore != nil {
-		return bestRandomScore, &otherNodes[bestRandomScore.exIndex]
+		return bestRandomScore, otherNodes[bestRandomScore.exIndex]
 	}
 	return nil, nil
 }
@@ -260,10 +259,6 @@ func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName st
 	case EP_BeginTx:
 		if dbName == "" && dsID == "" {
 			return fmt.Errorf("require query parameters [ _DbName ] [ _DsID ]"), endpoint, dbName, txID, dsID
-		}
-	default:
-		if txID == "" {
-			return fmt.Errorf("require query parameter [ _TxID ]"), endpoint, dbName, txID, dsID
 		}
 	}
 
