@@ -19,32 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func loadConfig(path string) (*global.Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var config global.Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	return &config, nil
-}
-
-func runServer() {
-	// Load configuration
-	configPath := "config.yaml"
-	if len(os.Args) > 1 {
-		configPath = os.Args[1]
-	}
-
-	config, err := loadConfig(configPath)
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-
+func runServer(config global.Config) {
 	// Initialize cluster health info
 	datasourceInfo := make([]cluster.DatasourceInfo, len(config.MyDatasources))
 	for i := range config.MyDatasources {
@@ -130,34 +105,24 @@ func runServer() {
 	log.Println("Server exited")
 }
 
-type Test struct {
-	str string
-	num int
-}
-type TestParent struct {
-	test []Test
-	strP string
-	numP int
-}
-
-func runTest() {
-	orgTest := TestParent{
-		test: []Test{
-			{str: "test", num: 123},
-		},
-		strP: "testP",
-		numP: 456,
-	}
-	newTest := orgTest
-	newTest.test = append(newTest.test, Test{str: "test2", num: 456})
-
-	newTest.test[0].num++
-	newTest.numP++
-
-	fmt.Println(orgTest)
-	fmt.Println(newTest)
-}
-
 func main() {
-	runServer()
+	// Load configuration
+	configPath := "config.yaml"
+	if len(os.Args) > 1 {
+		configPath = os.Args[1]
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Fatalf("Failed to read config file: %v", err)
+		return
+	}
+
+	var config global.Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		log.Fatalf("Failed to parse config file: %v", err)
+		return
+	}
+
+	runServer(config)
 }
