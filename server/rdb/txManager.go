@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"smartdatastream/server/global"
 	"sync"
 	"time"
 )
@@ -147,7 +148,7 @@ type TxManager struct {
 }
 
 // NewTxManager creates a new TxManager
-func NewTxManager(configs []Config) *TxManager {
+func NewTxManager(configs []global.DatasourceConfig) *TxManager {
 	dss := make([]*TxDatasource, len(configs))
 
 	for i, cfg := range configs {

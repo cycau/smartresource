@@ -5,6 +5,29 @@ import (
 	"net/http"
 )
 
+type Config struct {
+	NodeName      string             `yaml:"nodeName"`
+	NodePort      int                `yaml:"nodePort"`
+	SecretKey     string             `yaml:"secretKey"`
+	MaxHttpQueue  int                `yaml:"maxHttpQueue"`
+	MyDatasources []DatasourceConfig `yaml:"myDatasources"`
+	ClusterNodes  []string           `yaml:"clusterNodes"`
+}
+
+type DatasourceConfig struct {
+	DatasourceID           string `yaml:"datasourceId"`
+	DatabaseName           string `yaml:"databaseName"`
+	Driver                 string `yaml:"driver"`
+	DSN                    string `yaml:"dsn"`
+	MaxOpenConns           int    `yaml:"maxOpenConns"`
+	MinIdleConns           int    `yaml:"minIdleConns"`
+	MaxConnLifetimeSec     int    `yaml:"maxConnLifetimeSec"`
+	MaxTxConns             int    `yaml:"maxTxConns"`
+	MaxTxIdleTimeoutSec    int    `yaml:"maxTxIdleTimeoutSec"`
+	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
+	Readonly               bool   `yaml:"readonly"`
+}
+
 const QUERYP_DB_NAME = "_DbName"
 const QUERYP_TX_ID = "_TxID"
 const QUERYP_DS_ID = "_DsID"

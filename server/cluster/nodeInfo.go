@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"smartdatastream/server/global"
 	. "smartdatastream/server/global"
 
 	"github.com/paulbellamy/ratecounter"
@@ -26,6 +27,11 @@ type DatasourceInfo struct {
 	IdleConns    int `json:"idleConns"`
 	RunningQuery int `json:"runningQuery"`
 	RunningTx    int `json:"runningTx"`
+
+	LatencyP95Ms  int       `json:"latencyP95Ms"`
+	ErrorRate1m   float64   `json:"errorRate1m"`
+	TimeoutRate1m float64   `json:"timeoutRate1m"`
+	collectTime   time.Time `json:"-"`
 
 	StatLatency  *prometheus.SummaryVec   `json:"-"`
 	StatTotal    *ratecounter.RateCounter `json:"-"`
@@ -60,27 +66,47 @@ type NodeInfo struct {
 	Mu         sync.RWMutex `json:"-"`
 }
 
-func (d *DatasourceInfo) StatisticsResult(latencyMs int64, isError bool, isTimeout bool) {
-	d.StatTotal.Incr(1)
+/*****************************
+ * initialize Balancer
+ *****************************/
+const STAT_WINDOW_TIME = 5 * time.Minute
 
-	if isError {
-		d.StatErrors.Incr(1)
-		return
+func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
+	var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Objectives: map[float64]float64{0.95: 0.01},
+		MaxAge:     STAT_WINDOW_TIME,
+	}, []string{"latency"})
+
+	return &DatasourceInfo{
+		DatasourceID: config.DatasourceID,
+		DatabaseName: config.DatabaseName,
+		Active:       true,
+		Readonly:     config.Readonly,
+		MaxOpenConns: config.MaxOpenConns,
+		MinIdleConns: config.MinIdleConns,
+		MaxTxConns:   config.MaxTxConns,
+
+		StatLatency:  statLatency,
+		StatTotal:    ratecounter.NewRateCounter(STAT_WINDOW_TIME),
+		StatErrors:   ratecounter.NewRateCounter(STAT_WINDOW_TIME),
+		StatTimeouts: ratecounter.NewRateCounter(STAT_WINDOW_TIME),
+		collectTime:  time.Now().Add(-STAT_WINDOW_TIME),
 	}
-	if isTimeout {
-		d.StatTimeouts.Incr(1)
-		return
-	}
-	d.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
 }
 
 // 必要の場合はatomic.Pointerでラップして使うこと
 func (node *NodeInfo) Clone() NodeInfo {
-	node.Mu.RLock()
-	defer node.Mu.RUnlock()
+	node.Mu.Lock()
+	defer node.Mu.Unlock()
 
 	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
-	copy(datasources, node.HealthInfo.Datasources)
+	for idx, dsInfo := range node.HealthInfo.Datasources {
+		latencyP95Ms, errorRate1m, timeoutRate1m := collectStat(dsInfo)
+		dsInfo.LatencyP95Ms = latencyP95Ms
+		dsInfo.ErrorRate1m = errorRate1m
+		dsInfo.TimeoutRate1m = timeoutRate1m
+		datasources[idx] = dsInfo
+	}
 
 	return NodeInfo{
 		NodeID:    node.NodeID,
@@ -100,6 +126,20 @@ func (node *NodeInfo) Clone() NodeInfo {
 /*****************************
  * スコア計算
  *****************************/
+func (d *DatasourceInfo) StatisticsResult(latencyMs int64, isError bool, isTimeout bool) {
+	d.StatTotal.Incr(1)
+
+	if isError {
+		d.StatErrors.Incr(1)
+		return
+	}
+	if isTimeout {
+		d.StatTimeouts.Incr(1)
+		return
+	}
+	d.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
+}
+
 // 定数定義
 type ENDPOINT_TYPE int
 
@@ -199,6 +239,37 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 	return &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx}
 }
 
+const STAT_COLLECT_INTERVAL = 2 * time.Second
+
+func collectStat(dsInfo DatasourceInfo) (latencyP95Ms int, errorRate1m float64, timeoutRate1m float64) {
+
+	// 品質指標の正規化
+	if dsInfo.StatLatency == nil {
+		return dsInfo.LatencyP95Ms, dsInfo.ErrorRate1m, dsInfo.TimeoutRate1m
+	}
+
+	if time.Since(dsInfo.collectTime) < STAT_COLLECT_INTERVAL {
+		return dsInfo.LatencyP95Ms, dsInfo.ErrorRate1m, dsInfo.TimeoutRate1m
+	}
+
+	// collecte when self node
+	latency := &dto.Metric{}
+	dsInfo.StatLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency)
+	p95 := latency.GetSummary().GetQuantile()[0].GetValue()
+	if math.IsNaN(p95) {
+		p95 = 16.0
+	}
+
+	total := float64(dsInfo.StatTotal.Rate())
+	if total > 0 {
+		errorRate1m = float64(dsInfo.StatErrors.Rate()) / total
+		timeoutRate1m = float64(dsInfo.StatTimeouts.Rate()) / total
+	}
+
+	dsInfo.collectTime = time.Now()
+	return int(p95), errorRate1m, timeoutRate1m
+}
+
 func calculateMetrics(node *NodeInfo, dsInfo DatasourceInfo) normalizedMetrics {
 
 	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpQueue)
@@ -214,23 +285,9 @@ func calculateMetrics(node *NodeInfo, dsInfo DatasourceInfo) normalizedMetrics {
 	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.OpenConns))
 	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
 
-	// 品質指標の正規化
-	latency95 := &dto.Metric{}
-	dsInfo.StatLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency95)
-	p95 := latency95.GetSummary().GetQuantile()[0].GetValue()
-	if math.IsNaN(p95) {
-		p95 = 16.0
-	}
+	latencyP95Ms, errorRate1m, timeoutRate1m := collectStat(dsInfo)
 
-	errorRate1m := 0.0
-	timeoutRate1m := 0.0
-	total := float64(dsInfo.StatTotal.Rate())
-	if total > 0 {
-		errorRate1m = float64(dsInfo.StatErrors.Rate()) / total
-		timeoutRate1m = float64(dsInfo.StatTimeouts.Rate()) / total
-	}
-
-	latScore := 1 - clamp01(math.Log1p(float64(p95))/math.Log1p(LAT_BAD_MS))
+	latScore := 1 - clamp01(math.Log1p(float64(latencyP95Ms))/math.Log1p(LAT_BAD_MS))
 	errScore := 1 - clamp01(errorRate1m/ERR_RATE_BAD)
 	toutScore := 1 - clamp01(timeoutRate1m/TIMEOUT_RATE_BAD)
 

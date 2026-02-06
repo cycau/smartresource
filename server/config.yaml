@@ -8,7 +8,7 @@ clusterNodes:
   - "http://localhost:5678"
   - "http://localhost:5678"
 
-datasources:
+myDatasources:
   - datasourceId: pg_master
     databaseName: crm-system
     driver: postgres

@@ -11,13 +11,12 @@ import (
 	"time"
 
 	"smartdatastream/server/cluster"
+	"smartdatastream/server/global"
 	"smartdatastream/server/rdb"
 
 	gonanoid "github.com/matoous/go-nanoid/v2"
 
 	"github.com/google/uuid"
-	"github.com/paulbellamy/ratecounter"
-	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,36 +24,13 @@ const (
 	STAT_INTERVAL = 5 * time.Minute
 )
 
-type Config struct {
-	NodeName     string             `yaml:"nodeName"`
-	NodePort     int                `yaml:"nodePort"`
-	SecretKey    string             `yaml:"secretKey"`
-	MaxHttpQueue int                `yaml:"maxHttpQueue"`
-	Datasources  []DatasourceConfig `yaml:"datasources"`
-	ClusterNodes []string           `yaml:"clusterNodes"`
-}
-
-type DatasourceConfig struct {
-	DatasourceID           string `yaml:"datasourceId"`
-	DatabaseName           string `yaml:"databaseName"`
-	Driver                 string `yaml:"driver"`
-	DSN                    string `yaml:"dsn"`
-	MaxOpenConns           int    `yaml:"maxOpenConns"`
-	MinIdleConns           int    `yaml:"minIdleConns"`
-	MaxConnLifetimeSec     int    `yaml:"maxConnLifetimeSec"`
-	MaxTxConns             int    `yaml:"maxTxConns"`
-	MaxTxIdleTimeoutSec    int    `yaml:"maxTxIdleTimeoutSec"`
-	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
-	Readonly               bool   `yaml:"readonly"`
-}
-
-func loadConfig(path string) (*Config, error) {
+func loadConfig(path string) (*global.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var config Config
+	var config global.Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
@@ -79,50 +55,17 @@ func main() {
 	}
 
 	// Initialize cluster health info
-	// Initialize datasources
-	dsConfigs := make([]rdb.Config, len(config.Datasources))
-	hzDatasources := make([]cluster.DatasourceInfo, len(config.Datasources))
-	for i, ds := range config.Datasources {
-		if ds.Readonly {
-			ds.MaxTxConns = 0
+	datasourceInfo := make([]cluster.DatasourceInfo, len(config.MyDatasources))
+	for i, dsConfig := range config.MyDatasources {
+		if dsConfig.Readonly {
+			dsConfig.MaxTxConns = 0
 		}
 
-		dsConfigs[i] = rdb.Config{
-			DatasourceID:           ds.DatasourceID,
-			DatabaseName:           ds.DatabaseName,
-			Driver:                 ds.Driver,
-			DSN:                    ds.DSN,
-			MaxOpenConns:           ds.MaxOpenConns,
-			MinIdleConns:           ds.MinIdleConns,
-			MaxConnLifetimeSec:     ds.MaxConnLifetimeSec,
-			MaxTxConns:             ds.MaxTxConns,
-			DefaultQueryTimeoutSec: ds.DefaultQueryTimeoutSec,
-			MaxTxIdleTimeoutSec:    ds.MaxTxIdleTimeoutSec,
-			Readonly:               ds.Readonly,
-		}
-
-		var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-			Objectives: map[float64]float64{0.95: 0.01},
-			MaxAge:     STAT_INTERVAL,
-		}, []string{"stat"})
-
-		hzDatasources[i] = cluster.DatasourceInfo{
-			DatasourceID: ds.DatasourceID,
-			DatabaseName: ds.DatabaseName,
-			Active:       true,
-			Readonly:     ds.Readonly,
-			MaxOpenConns: ds.MaxOpenConns,
-			MinIdleConns: ds.MinIdleConns,
-			MaxTxConns:   ds.MaxTxConns,
-			StatLatency:  statLatency,
-			StatTotal:    ratecounter.NewRateCounter(STAT_INTERVAL),
-			StatErrors:   ratecounter.NewRateCounter(STAT_INTERVAL),
-			StatTimeouts: ratecounter.NewRateCounter(STAT_INTERVAL),
-		}
+		datasourceInfo[i] = *cluster.NewDatasourceInfo(dsConfig)
 	}
 
 	// Initialize TxManager
-	txManager := rdb.NewTxManager(dsConfigs)
+	txManager := rdb.NewTxManager(config.MyDatasources)
 
 	// Set maxHttpQueue for HTTP connection limiting
 	maxHttpQueue := config.MaxHttpQueue
@@ -132,14 +75,14 @@ func main() {
 	log.Printf("HTTP connection limit: %d", maxHttpQueue)
 
 	nodeId, _ := gonanoid.New(9)
-	selfNode := &cluster.NodeInfo{
+	thisNode := &cluster.NodeInfo{
 		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, nodeId),
 		Status:    cluster.STARTING,
 		BaseURL:   "-",
 		SecretKey: config.SecretKey,
 		HealthInfo: cluster.HealthInfo{
 			MaxHttpQueue: maxHttpQueue,
-			Datasources:  hzDatasources,
+			Datasources:  datasourceInfo,
 		},
 	}
 
@@ -151,7 +94,7 @@ func main() {
 			BaseURL: nodeURL,
 		})
 	}
-	balancer := cluster.NewBalancer(selfNode, clusterNodes)
+	balancer := cluster.NewBalancer(thisNode, clusterNodes)
 
 	// Create router
 	router := NewRouter(balancer, txManager)
@@ -178,9 +121,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
-	selfNode.Mu.Lock()
-	selfNode.Status = cluster.STOPPING
-	selfNode.Mu.Unlock()
+	thisNode.Mu.Lock()
+	thisNode.Status = cluster.STOPPING
+	thisNode.Mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

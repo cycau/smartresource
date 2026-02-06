@@ -11,8 +11,8 @@ import (
 )
 
 type Balancer struct {
-	SelfNode   *NodeInfo  `json:"selfNode"`
-	OtherNodes []NodeInfo `json:"otherNodes"`
+	SelfNode   *NodeInfo
+	OtherNodes []NodeInfo
 }
 
 /*****************************
@@ -123,8 +123,8 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 }
 
 func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *ScoreWithWeight, recommendScore *ScoreWithWeight) {
-	selfNode.Mu.RLock()
-	defer selfNode.Mu.RUnlock()
+	selfNode.Mu.Lock()
+	defer selfNode.Mu.Unlock()
 
 	scores := make([]*ScoreWithWeight, 0, len(selfNode.HealthInfo.Datasources))
 

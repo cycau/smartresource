@@ -4,26 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"smartdatastream/server/global"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-// DatasourceConfig represents configuration for a single datasource
-type Config struct {
-	DatasourceID           string
-	DatabaseName           string
-	Driver                 string
-	DSN                    string
-	MaxOpenConns           int
-	MinIdleConns           int
-	MaxConnLifetimeSec     int
-	MaxTxConns             int
-	MaxTxIdleTimeoutSec    int
-	DefaultQueryTimeoutSec int
-	Readonly               bool
-}
 
 type Datasource struct {
 	DatasourceID        string
@@ -37,7 +23,7 @@ type Datasource struct {
 }
 
 // Initialize initializes datasources from configuration
-func NewDatasource(cfg Config) (*Datasource, error) {
+func NewDatasource(cfg global.DatasourceConfig) (*Datasource, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
