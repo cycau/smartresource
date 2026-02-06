@@ -14,39 +14,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-type DatasourceInfo struct {
-	DatasourceID string `json:"datasourceId"` // TODO: for pinpoint identification to execute
-	DatabaseName string `json:"databaseName"`
-	Active       bool   `json:"active"`
-	Readonly     bool   `json:"readonly"`
-	MaxOpenConns int    `json:"maxOpenConns"`
-	MinIdleConns int    `json:"minIdleConns"`
-	MaxTxConns   int    `json:"maxTxConns"`
-
-	OpenConns    int `json:"openConns"`
-	IdleConns    int `json:"idleConns"`
-	RunningQuery int `json:"runningQuery"`
-	RunningTx    int `json:"runningTx"`
-
-	LatencyP95Ms  int       `json:"latencyP95Ms"`
-	ErrorRate1m   float64   `json:"errorRate1m"`
-	TimeoutRate1m float64   `json:"timeoutRate1m"`
-	collectTime   time.Time `json:"-"`
-
-	StatLatency  *prometheus.SummaryVec   `json:"-"`
-	StatTotal    *ratecounter.RateCounter `json:"-"`
-	StatErrors   *ratecounter.RateCounter `json:"-"`
-	StatTimeouts *ratecounter.RateCounter `json:"-"`
-}
-
-type HealthInfo struct {
-	MaxHttpQueue int              `json:"maxHttpQueue"`
-	RunningHttp  int              `json:"runningHttp"`
-	UpTime       time.Time        `json:"upTime"`
-	CheckTime    time.Time        `json:"checkTime"`
-	Datasources  []DatasourceInfo `json:"datasources"`
-}
-
 type NodeStatus string
 
 const (
@@ -66,8 +33,41 @@ type NodeInfo struct {
 	Mu         sync.RWMutex `json:"-"`
 }
 
+type HealthInfo struct {
+	MaxHttpQueue int              `json:"maxHttpQueue"`
+	RunningHttp  int              `json:"runningHttp"`
+	UpTime       time.Time        `json:"upTime"`
+	CheckTime    time.Time        `json:"checkTime"`
+	Datasources  []DatasourceInfo `json:"datasources"`
+}
+
+type DatasourceInfo struct {
+	DatasourceID string `json:"datasourceId"`
+	DatabaseName string `json:"databaseName"`
+	Active       bool   `json:"active"`
+	Readonly     bool   `json:"readonly"`
+	MaxOpenConns int    `json:"maxOpenConns"`
+	MaxIdleConns int    `json:"maxIdleConns"`
+	MaxTxConns   int    `json:"maxTxConns"`
+
+	OpenConns    int `json:"openConns"`
+	IdleConns    int `json:"idleConns"`
+	RunningQuery int `json:"runningQuery"`
+	RunningTx    int `json:"runningTx"`
+
+	LatencyP95Ms  int       `json:"latencyP95Ms"`
+	ErrorRate1m   float64   `json:"errorRate1m"`
+	TimeoutRate1m float64   `json:"timeoutRate1m"`
+	collectTime   time.Time `json:"-"`
+
+	StatLatency  *prometheus.SummaryVec   `json:"-"`
+	StatTotal    *ratecounter.RateCounter `json:"-"`
+	StatErrors   *ratecounter.RateCounter `json:"-"`
+	StatTimeouts *ratecounter.RateCounter `json:"-"`
+}
+
 /*****************************
- * initialize Balancer
+ * initialize DatasourceInfo
  *****************************/
 const STAT_WINDOW_TIME = 5 * time.Minute
 
@@ -83,7 +83,7 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 		Active:       true,
 		Readonly:     config.Readonly,
 		MaxOpenConns: config.MaxOpenConns,
-		MinIdleConns: config.MinIdleConns,
+		MaxIdleConns: config.MaxIdleConns,
 		MaxTxConns:   config.MaxTxConns,
 
 		StatLatency:  statLatency,
@@ -100,12 +100,10 @@ func (node *NodeInfo) Clone() NodeInfo {
 	defer node.Mu.Unlock()
 
 	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
-	for idx, dsInfo := range node.HealthInfo.Datasources {
-		latencyP95Ms, errorRate1m, timeoutRate1m := collectStat(dsInfo)
-		dsInfo.LatencyP95Ms = latencyP95Ms
-		dsInfo.ErrorRate1m = errorRate1m
-		dsInfo.TimeoutRate1m = timeoutRate1m
-		datasources[idx] = dsInfo
+	for idx := range node.HealthInfo.Datasources {
+		dsInfo := &node.HealthInfo.Datasources[idx]
+		collectStats(dsInfo)
+		datasources[idx] = *dsInfo
 	}
 
 	return NodeInfo{
@@ -126,7 +124,7 @@ func (node *NodeInfo) Clone() NodeInfo {
 /*****************************
  * スコア計算
  *****************************/
-func (d *DatasourceInfo) StatisticsResult(latencyMs int64, isError bool, isTimeout bool) {
+func (d *DatasourceInfo) StatsResult(latencyMs int64, isError bool, isTimeout bool) {
 	d.StatTotal.Incr(1)
 
 	if isError {
@@ -138,6 +136,46 @@ func (d *DatasourceInfo) StatisticsResult(latencyMs int64, isError bool, isTimeo
 		return
 	}
 	d.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
+}
+
+func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
+
+	if node.Status != SERVING {
+		return nil
+	}
+	if node.HealthInfo.RunningHttp >= node.HealthInfo.MaxHttpQueue {
+		return nil
+	}
+
+	dsInfo := &node.HealthInfo.Datasources[dsIdx]
+
+	if !dsInfo.Active {
+		return nil
+	}
+	if dsInfo.Readonly && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
+		return nil
+	}
+	if dsInfo.DatabaseName != tarDbName {
+		return nil
+	}
+
+	collectStats(dsInfo)
+	m := calculateMetrics(node, dsInfo)
+	score := calculateScore(endpoint, m)
+
+	weight := 0.0
+	switch endpoint {
+	case EP_Query:
+		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns)
+	case EP_Execute:
+		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns/2)
+	case EP_BeginTx:
+		weight = float64(dsInfo.MaxTxConns)
+	default:
+		weight = float64(dsInfo.MaxOpenConns)
+	}
+
+	return &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx}
 }
 
 // 定数定義
@@ -165,10 +203,11 @@ type normalizedMetrics struct {
 	dbFree      float64
 	txFree      float64
 	idleScore   float64
-	latScore    float64
-	errScore    float64
-	toutScore   float64
 	uptimeScore float64
+
+	latScore  float64
+	errScore  float64
+	toutScore float64
 }
 
 // Node score information
@@ -199,57 +238,17 @@ func clamp01(x float64) float64 {
 	return math.Min(1.0, math.Max(0.0, x))
 }
 
-// スコア計算
-func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
-
-	if node.Status != SERVING {
-		return nil
-	}
-	if node.HealthInfo.RunningHttp >= node.HealthInfo.MaxHttpQueue {
-		return nil
-	}
-
-	dsInfo := node.HealthInfo.Datasources[dsIdx]
-
-	if !dsInfo.Active {
-		return nil
-	}
-	if dsInfo.Readonly && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
-		return nil
-	}
-	if dsInfo.DatabaseName != tarDbName {
-		return nil
-	}
-
-	m := calculateMetrics(node, dsInfo)
-	score := calculateScore(endpoint, m)
-
-	weight := 0.0
-	switch endpoint {
-	case EP_Query:
-		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns)
-	case EP_Execute:
-		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns/2)
-	case EP_BeginTx:
-		weight = float64(dsInfo.MaxTxConns)
-	default:
-		weight = float64(dsInfo.MaxOpenConns)
-	}
-
-	return &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx}
-}
-
 const STAT_COLLECT_INTERVAL = 2 * time.Second
 
-func collectStat(dsInfo DatasourceInfo) (latencyP95Ms int, errorRate1m float64, timeoutRate1m float64) {
+func collectStats(dsInfo *DatasourceInfo) {
 
 	// 品質指標の正規化
 	if dsInfo.StatLatency == nil {
-		return dsInfo.LatencyP95Ms, dsInfo.ErrorRate1m, dsInfo.TimeoutRate1m
+		return
 	}
 
 	if time.Since(dsInfo.collectTime) < STAT_COLLECT_INTERVAL {
-		return dsInfo.LatencyP95Ms, dsInfo.ErrorRate1m, dsInfo.TimeoutRate1m
+		return
 	}
 
 	// collecte when self node
@@ -261,16 +260,20 @@ func collectStat(dsInfo DatasourceInfo) (latencyP95Ms int, errorRate1m float64, 
 	}
 
 	total := float64(dsInfo.StatTotal.Rate())
+	errorRate1m := 0.0
+	timeoutRate1m := 0.0
 	if total > 0 {
 		errorRate1m = float64(dsInfo.StatErrors.Rate()) / total
 		timeoutRate1m = float64(dsInfo.StatTimeouts.Rate()) / total
 	}
 
+	dsInfo.LatencyP95Ms = int(p95)
+	dsInfo.ErrorRate1m = errorRate1m
+	dsInfo.TimeoutRate1m = timeoutRate1m
 	dsInfo.collectTime = time.Now()
-	return int(p95), errorRate1m, timeoutRate1m
 }
 
-func calculateMetrics(node *NodeInfo, dsInfo DatasourceInfo) normalizedMetrics {
+func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
 
 	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpQueue)
 	dbUsage := float64(dsInfo.RunningQuery) / float64(dsInfo.MaxOpenConns)
@@ -285,21 +288,20 @@ func calculateMetrics(node *NodeInfo, dsInfo DatasourceInfo) normalizedMetrics {
 	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.OpenConns))
 	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
 
-	latencyP95Ms, errorRate1m, timeoutRate1m := collectStat(dsInfo)
-
-	latScore := 1 - clamp01(math.Log1p(float64(latencyP95Ms))/math.Log1p(LAT_BAD_MS))
-	errScore := 1 - clamp01(errorRate1m/ERR_RATE_BAD)
-	toutScore := 1 - clamp01(timeoutRate1m/TIMEOUT_RATE_BAD)
+	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
+	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_RATE_BAD)
+	toutScore := 1 - clamp01(dsInfo.TimeoutRate1m/TIMEOUT_RATE_BAD)
 
 	return normalizedMetrics{
 		httpFree:    httpFree,
 		dbFree:      dbFree,
 		txFree:      txFree,
 		idleScore:   idleScore,
-		latScore:    latScore,
-		errScore:    errScore,
-		toutScore:   toutScore,
 		uptimeScore: uptimeScore,
+
+		latScore:  latScore,
+		errScore:  errScore,
+		toutScore: toutScore,
 	}
 }
 

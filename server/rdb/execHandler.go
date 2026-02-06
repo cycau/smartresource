@@ -50,7 +50,7 @@ type ParamValue struct {
 
 // ExecuteResponse represents the response for /v1/rdb/execute
 type QueryResponse struct {
-	ColumnMeta    []ColumnMeta `json:"columnMeta,omitempty"`
+	Meta          []ColumnMeta `json:"meta,omitempty"`
 	Rows          []any        `json:"rows"`
 	TotalCount    int          `json:"totalCount"`
 	ElapsedTimeMs int64        `json:"elapsedTimeMs"`
@@ -77,9 +77,9 @@ type ExecHandler struct {
 /************************************************************
  * NewExecuteHandler creates a new ExecuteHandler
  ************************************************************/
-func NewExecHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *ExecHandler {
+func NewExecHandler(selfNode *cluster.NodeInfo, txManager *TxManager) *ExecHandler {
 	return &ExecHandler{
-		selfNode:  nodeInfo,
+		selfNode:  selfNode,
 		txManager: txManager,
 	}
 }
@@ -95,8 +95,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
 	// Update health info: increment RunningSql
-	exec.statisticsRequest(dsIDX, 1)
-	defer exec.statisticsRequest(dsIDX, -1)
+	exec.statsRequest(dsIDX, 1)
+	defer exec.statsRequest(dsIDX, -1)
 
 	var rows *sql.Rows
 	var releaseResource releaseResourceFunc
@@ -108,11 +108,11 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
@@ -123,11 +123,11 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
@@ -168,7 +168,8 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	rowCount := 0
 	for rows.Next() {
 		if rowCount >= limit {
-			break
+			rowCount++
+			continue
 		}
 
 		// Create slice for scanning
@@ -196,7 +197,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 			case decimal.Decimal:
 				values[i] = v.String()
 			default:
-				// Return the value as-is to let JSON encoder handle it
+				values[i] = v
 			}
 		}
 
@@ -209,25 +210,15 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Count remaining rows if needed
-	if rowCount < limit {
-		// We've read all rows, rowCount is the total
-	} else {
-		// We hit the limit, count remaining (this is approximate)
-		for rows.Next() {
-			rowCount++
-		}
-	}
-
 	// Calculate execution time
 	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful query
-	exec.statisticsResult(dsIDX, elapsedTimeMs, false, false)
+	exec.statsResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := QueryResponse{
-		ColumnMeta:    columnMeta,
+		Meta:          columnMeta,
 		Rows:          resultRows,
 		TotalCount:    rowCount,
 		ElapsedTimeMs: elapsedTimeMs,
@@ -249,8 +240,8 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
 	// Update health info: increment RunningSql
-	exec.statisticsRequest(dsIDX, 1)
-	defer exec.statisticsRequest(dsIDX, -1)
+	exec.statsRequest(dsIDX, 1)
+	defer exec.statsRequest(dsIDX, -1)
 
 	var result sql.Result
 	var releaseResource releaseResourceFunc
@@ -262,11 +253,11 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
@@ -276,11 +267,11 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statisticsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
@@ -297,7 +288,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful execution
-	exec.statisticsResult(dsIDX, elapsedTimeMs, false, false)
+	exec.statsResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := ExecuteResponse{
@@ -313,7 +304,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 /************************************************************
  * statistics methods
  ************************************************************/
-func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
+func (exec *ExecHandler) statsRequest(datasourceIdx int, delta int) {
 	exec.selfNode.Mu.Lock()
 
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
@@ -325,13 +316,13 @@ func (exec *ExecHandler) statisticsRequest(datasourceIdx int, delta int) {
 	exec.selfNode.Mu.Unlock()
 }
 
-func (exec *ExecHandler) statisticsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
+func (exec *ExecHandler) statsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
 	exec.selfNode.Mu.Lock()
 
 	// Find or create datasource info
 	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
 
-	dsInfo.StatisticsResult(latencyMs, isError, isTimeout)
+	dsInfo.StatsResult(latencyMs, isError, isTimeout)
 
 	exec.selfNode.Mu.Unlock()
 }
@@ -365,7 +356,7 @@ func (exec *ExecHandler) parseRequest(r *http.Request) (dsIDX int, request Execu
 	}
 
 	txID = r.URL.Query().Get(QUERYP_TX_ID)
-	// get datasourceId from context
+	// get datasource index from context
 	dsIDX, ok := GetCtxDsIdx(r)
 	if !ok && txID == "" {
 		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("Datasource INDEX hasn't decided")

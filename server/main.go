@@ -16,12 +16,7 @@ import (
 
 	gonanoid "github.com/matoous/go-nanoid/v2"
 
-	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
-)
-
-const (
-	STAT_INTERVAL = 5 * time.Minute
 )
 
 func loadConfig(path string) (*global.Config, error) {
@@ -38,11 +33,7 @@ func loadConfig(path string) (*global.Config, error) {
 	return &config, nil
 }
 
-func UUID() string {
-	return uuid.New().String()
-}
-
-func main() {
+func runServer() {
 	// Load configuration
 	configPath := "config.yaml"
 	if len(os.Args) > 1 {
@@ -56,12 +47,13 @@ func main() {
 
 	// Initialize cluster health info
 	datasourceInfo := make([]cluster.DatasourceInfo, len(config.MyDatasources))
-	for i, dsConfig := range config.MyDatasources {
+	for i := range config.MyDatasources {
+		dsConfig := &config.MyDatasources[i]
 		if dsConfig.Readonly {
 			dsConfig.MaxTxConns = 0
 		}
 
-		datasourceInfo[i] = *cluster.NewDatasourceInfo(dsConfig)
+		datasourceInfo[i] = *cluster.NewDatasourceInfo(*dsConfig)
 	}
 
 	// Initialize TxManager
@@ -136,4 +128,36 @@ func main() {
 	txManager.Shutdown()
 
 	log.Println("Server exited")
+}
+
+type Test struct {
+	str string
+	num int
+}
+type TestParent struct {
+	test []Test
+	strP string
+	numP int
+}
+
+func runTest() {
+	orgTest := TestParent{
+		test: []Test{
+			{str: "test", num: 123},
+		},
+		strP: "testP",
+		numP: 456,
+	}
+	newTest := orgTest
+	newTest.test = append(newTest.test, Test{str: "test2", num: 456})
+
+	newTest.test[0].num++
+	newTest.numP++
+
+	fmt.Println(orgTest)
+	fmt.Println(newTest)
+}
+
+func main() {
+	runServer()
 }

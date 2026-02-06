@@ -14,7 +14,7 @@ myDatasources:
     driver: postgres
     dsn: "postgres://user:password@localhost:25432/incident_manager"
     maxOpenConns: 100
-    minIdleConns: 10
+    maxIdleConns: 10
     maxConnLifetimeSec: 1800
     maxTxConns: 5
     maxTxIdleTimeoutSec: 15
@@ -25,7 +25,7 @@ myDatasources:
     driver: postgres
     dsn: "postgres://user:password@localhost:25432/incident_manager"
     maxOpenConns: 100
-    minIdleConns: 10
+    maxIdleConns: 10
     maxConnLifetimeSec: 1800
     maxTxConns: 5
     maxTxIdleTimeoutSec: 15

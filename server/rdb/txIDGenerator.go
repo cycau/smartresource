@@ -42,7 +42,7 @@ func NewTxIDGenerator() *TxIDGenerator {
 
 // Generate creates a new transaction ID
 // Format: base64url( issuedAtSeconds|sequenceNumber|datasourceIndex|clientNodeIndex|randomBytes )
-func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (string, error) {
+func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (txID string, err error) {
 	// Allocate buffer for payload
 	payload := make([]byte, txIDPayloadSize)
 	offset := 0
@@ -78,9 +78,9 @@ func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (stri
 }
 
 // VerifyAndParse verifies and parses a transaction ID
-func (g *TxIDGenerator) GetDatasourceIndex(txId string) (int, error) {
+func (g *TxIDGenerator) GetDatasourceIndex(txID string) (dsIdx int, err error) {
 	// Decode base64url
-	payload, err := base64.RawURLEncoding.DecodeString(txId)
+	payload, err := base64.RawURLEncoding.DecodeString(txID)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrInvalidTxID, err)
 	}

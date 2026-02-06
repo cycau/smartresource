@@ -151,10 +151,10 @@ type TxManager struct {
 func NewTxManager(configs []global.DatasourceConfig) *TxManager {
 	dss := make([]*TxDatasource, len(configs))
 
-	for i, cfg := range configs {
-		ds, err := NewDatasource(cfg)
+	for i, config := range configs {
+		ds, err := NewDatasource(config)
 		if err != nil {
-			panic(fmt.Sprintf("failed to initialize datasource %s: %v", cfg.DatasourceID, err))
+			panic(fmt.Sprintf("failed to initialize datasource %s: %v", config.DatasourceID, err))
 		}
 
 		txDs := &TxDatasource{
@@ -228,6 +228,10 @@ func (tm *TxManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *
 	}
 
 	ds := tm.dss[dsIdx]
+	if ds == nil {
+		return nil, nil, fmt.Errorf("datasource not found: %d", dsIdx)
+	}
+
 	entry, err = ds.getEntry(txID, executing)
 	if err != nil {
 		return nil, nil, err
@@ -373,7 +377,7 @@ func (tm *TxManager) ExecTx(ctx context.Context, timeoutSec *int, txId string, s
 /************************************************************
  * Statistics returns the statistics of a datasource
  ************************************************************/
-func (tm *TxManager) Statistics(datasourceIdx int) (error, int, int, int) {
+func (tm *TxManager) Stats(datasourceIdx int) (err error, openConns int, idleConns int, totalEntries int) {
 	ds := tm.dss[datasourceIdx]
 	if ds == nil {
 		return fmt.Errorf("datasource not found: %d", datasourceIdx), 0, 0, 0
@@ -383,8 +387,8 @@ func (tm *TxManager) Statistics(datasourceIdx int) (error, int, int, int) {
 	defer ds.mu.Unlock()
 
 	stats := ds.DB.Stats()
-	openConns := stats.OpenConnections
-	idleConns := stats.Idle
+	openConns = stats.OpenConnections
+	idleConns = stats.Idle
 	//waitConns := int(stats.WaitCount)
 
 	return nil, openConns, idleConns, len(ds.entries)
@@ -395,8 +399,10 @@ func (tm *TxManager) Statistics(datasourceIdx int) (error, int, int, int) {
  ************************************************************/
 func (tm *TxManager) startCleanupTicker() {
 	defer tm.wg.Done()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-tm.stopCleanupTicker: // stop cleanup

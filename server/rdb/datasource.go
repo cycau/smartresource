@@ -39,7 +39,7 @@ func NewDatasource(cfg global.DatasourceConfig) (*Datasource, error) {
 
 	// Set connection pool settings
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MinIdleConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	if cfg.MaxConnLifetimeSec > 0 {
 		db.SetConnMaxLifetime(time.Duration(cfg.MaxConnLifetimeSec) * time.Second)
 	}
@@ -72,6 +72,7 @@ func (d *Datasource) newTx(isolationLevel sql.IsolationLevel) (*sql.Conn, *sql.T
 	tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{
 		Isolation: isolationLevel,
 	})
+
 	if err != nil {
 		conn.Close()
 		return nil, nil, fmt.Errorf("failed to begin transaction: %w", err)

@@ -13,8 +13,9 @@ import (
 
 // BeginTxRequest represents the request body for /v1/rdb/tx/begin
 type BeginTxRequest struct {
-	ClientNodeIndex int  `json:"clientNodeIndex"`
-	TimeoutSec      *int `json:"timeoutSec,omitempty"`
+	ClientNodeIndex int    `json:"clientNodeIndex"`
+	IsolationLevel  string `json:"isolationLevel,omitempty"`
+	TimeoutSec      *int   `json:"timeoutSec,omitempty"`
 }
 
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
@@ -22,11 +23,6 @@ type BeginTxResponse struct {
 	TxID      string    `json:"txId"`
 	NodeID    string    `json:"nodeId"`
 	ExpiresAt time.Time `json:"expiresAt"`
-}
-
-// TxIdRequest represents the request body for /v1/rdb/tx/commit and /v1/rdb/tx/rollback
-type TxIdRequest struct {
-	TxID string `json:"txId"`
 }
 
 // OkResponse represents a simple OK response
@@ -50,14 +46,14 @@ func NewTxHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *TxHandler {
 
 // BeginTx handles /v1/rdb/tx/begin
 func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
-	dsIDX, req, err := tx.parseBeginRequest(r)
+	dsIDX, req, isolationLevel, err := tx.parseBeginRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := tx.txManager.Begin(dsIDX, sql.LevelReadCommitted, req.TimeoutSec, req.ClientNodeIndex)
+	txEntry, err := tx.txManager.Begin(dsIDX, isolationLevel, req.TimeoutSec, req.ClientNodeIndex)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
@@ -169,22 +165,40 @@ func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, error) {
+func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sql.IsolationLevel, error) {
 	var req BeginTxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return -1, BeginTxRequest{}, fmt.Errorf("failed to parse request: %w", err)
+		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// get datasourceId from context
 	dsIDX, ok := GetCtxDsIdx(r)
 	if !ok {
-		return -1, BeginTxRequest{}, fmt.Errorf("datasource INDEX is required")
+		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("datasource INDEX is required")
 	}
 	if dsIDX < 0 || dsIDX >= len(tx.selfNode.HealthInfo.Datasources) {
-		return -1, BeginTxRequest{}, fmt.Errorf("invalid datasource INDEX: %d", dsIDX)
+		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("invalid datasource INDEX: %d", dsIDX)
 	}
 
-	return dsIDX, req, nil
+	isolationLevel := sql.LevelReadCommitted
+	switch req.IsolationLevel {
+	case "READ_UNCOMMITTED":
+		isolationLevel = sql.LevelReadUncommitted
+	case "READ_COMMITTED":
+		isolationLevel = sql.LevelReadCommitted
+	case "WRITE_COMMITTED":
+		isolationLevel = sql.LevelWriteCommitted
+	case "REPEATABLE_READ":
+		isolationLevel = sql.LevelRepeatableRead
+	case "SNAPSHOT":
+		isolationLevel = sql.LevelSnapshot
+	case "SERIALIZABLE":
+		isolationLevel = sql.LevelSerializable
+	case "LINEARIZABLE":
+		isolationLevel = sql.LevelLinearizable
+	}
+
+	return dsIDX, req, isolationLevel, nil
 }
 
 func getTxID(r *http.Request) string {
