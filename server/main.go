@@ -43,14 +43,12 @@ func runServer(config global.Config) {
 
 	nodeId, _ := gonanoid.New(9)
 	thisNode := &cluster.NodeInfo{
-		NodeID:    fmt.Sprintf("%s-%s", config.NodeName, nodeId),
-		Status:    cluster.STARTING,
-		BaseURL:   "-",
-		SecretKey: config.SecretKey,
-		HealthInfo: cluster.HealthInfo{
-			MaxHttpQueue: maxHttpQueue,
-			Datasources:  datasourceInfo,
-		},
+		NodeID:       fmt.Sprintf("%s-%s", config.NodeName, nodeId),
+		Status:       cluster.STARTING,
+		BaseURL:      "-",
+		SecretKey:    config.SecretKey,
+		MaxHttpQueue: maxHttpQueue,
+		Datasources:  datasourceInfo,
 	}
 
 	// collect cluster health information

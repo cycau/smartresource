@@ -176,7 +176,7 @@ func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sq
 	if !ok {
 		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("datasource INDEX is required")
 	}
-	if dsIDX < 0 || dsIDX >= len(tx.selfNode.HealthInfo.Datasources) {
+	if dsIDX < 0 || dsIDX >= len(tx.selfNode.Datasources) {
 		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("invalid datasource INDEX: %d", dsIDX)
 	}
 

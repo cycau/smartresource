@@ -60,7 +60,7 @@ func (r *Router) StartCollectHealthTicker() {
 
 	r.balancer.SelfNode.Mu.Lock()
 	r.balancer.SelfNode.Status = cluster.SERVING
-	r.balancer.SelfNode.HealthInfo.UpTime = time.Now()
+	r.balancer.SelfNode.UpTime = time.Now()
 	r.balancer.SelfNode.Mu.Unlock()
 
 	go func() {
@@ -82,7 +82,7 @@ func (r *Router) collectHealth(isSync bool) {
 			defer wg.Done()
 
 			if node.Status == cluster.HEALZERR {
-				if time.Since(node.HealthInfo.CheckTime) < HEALZ_ERROR_INTERVAL {
+				if time.Since(node.CheckTime) < HEALZ_ERROR_INTERVAL {
 					return
 				}
 			}
@@ -102,7 +102,7 @@ func (r *Router) collectHealth(isSync bool) {
 				log.Printf("Failed to do request for %s: %v", node.NodeID, err)
 				node.Mu.Lock()
 				node.Status = cluster.HEALZERR
-				node.HealthInfo.CheckTime = time.Now()
+				node.CheckTime = time.Now()
 				return
 			}
 			defer response.Body.Close()
@@ -125,8 +125,13 @@ func (r *Router) collectHealth(isSync bool) {
 			node.Mu.Lock()
 			node.NodeID = responsedNodeInfo.NodeID
 			node.Status = responsedNodeInfo.Status
-			node.HealthInfo = responsedNodeInfo.HealthInfo
-			node.HealthInfo.CheckTime = time.Now()
+
+			node.MaxHttpQueue = responsedNodeInfo.MaxHttpQueue
+			node.RunningHttp = responsedNodeInfo.RunningHttp
+			node.UpTime = responsedNodeInfo.UpTime
+			node.CheckTime = responsedNodeInfo.CheckTime
+			node.Datasources = responsedNodeInfo.Datasources
+			node.CheckTime = time.Now()
 		}(node)
 	}
 
@@ -138,16 +143,16 @@ func (r *Router) collectHealth(isSync bool) {
 	selfNode.Mu.Lock()
 	defer selfNode.Mu.Unlock()
 
-	for i := range selfNode.HealthInfo.Datasources {
+	for i := range selfNode.Datasources {
 		_, openConns, idleConns, runningTx := r.txManager.Stats(i)
 
-		ds := &selfNode.HealthInfo.Datasources[i]
+		ds := &selfNode.Datasources[i]
 		ds.OpenConns = openConns
 		ds.IdleConns = idleConns
 		ds.RunningTx = runningTx
 	}
 
-	selfNode.HealthInfo.CheckTime = time.Now()
+	selfNode.CheckTime = time.Now()
 }
 
 /*****************************

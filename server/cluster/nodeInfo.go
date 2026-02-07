@@ -25,20 +25,17 @@ const (
 )
 
 type NodeInfo struct {
-	NodeID     string       `json:"nodeId"`
-	Status     NodeStatus   `json:"status"`
-	BaseURL    string       `json:"-"`
-	SecretKey  string       `json:"-"`
-	HealthInfo HealthInfo   `json:"healthInfo"`
-	Mu         sync.RWMutex `json:"-"`
-}
+	NodeID    string     `json:"nodeId"`
+	Status    NodeStatus `json:"status"`
+	BaseURL   string     `json:"-"`
+	SecretKey string     `json:"-"`
 
-type HealthInfo struct {
 	MaxHttpQueue int              `json:"maxHttpQueue"`
 	RunningHttp  int              `json:"runningHttp"`
 	UpTime       time.Time        `json:"upTime"`
 	CheckTime    time.Time        `json:"checkTime"`
 	Datasources  []DatasourceInfo `json:"datasources"`
+	Mu           sync.RWMutex     `json:"-"`
 }
 
 type DatasourceInfo struct {
@@ -99,25 +96,23 @@ func (node *NodeInfo) Clone() NodeInfo {
 	node.Mu.Lock()
 	defer node.Mu.Unlock()
 
-	datasources := make([]DatasourceInfo, len(node.HealthInfo.Datasources))
-	for idx := range node.HealthInfo.Datasources {
-		dsInfo := &node.HealthInfo.Datasources[idx]
+	datasources := make([]DatasourceInfo, len(node.Datasources))
+	for idx := range node.Datasources {
+		dsInfo := &node.Datasources[idx]
 		collectStats(dsInfo)
 		datasources[idx] = *dsInfo
 	}
 
 	return NodeInfo{
-		NodeID:    node.NodeID,
-		Status:    node.Status,
-		BaseURL:   "-",
-		SecretKey: "-",
-		HealthInfo: HealthInfo{
-			MaxHttpQueue: node.HealthInfo.MaxHttpQueue,
-			RunningHttp:  node.HealthInfo.RunningHttp,
-			UpTime:       node.HealthInfo.UpTime,
-			CheckTime:    node.HealthInfo.CheckTime,
-			Datasources:  datasources,
-		},
+		NodeID:       node.NodeID,
+		Status:       node.Status,
+		BaseURL:      "-",
+		SecretKey:    "-",
+		MaxHttpQueue: node.MaxHttpQueue,
+		RunningHttp:  node.RunningHttp,
+		UpTime:       node.UpTime,
+		CheckTime:    node.CheckTime,
+		Datasources:  datasources,
 	}
 }
 
@@ -143,11 +138,11 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 	if node.Status != SERVING {
 		return nil
 	}
-	if node.HealthInfo.RunningHttp >= node.HealthInfo.MaxHttpQueue {
+	if node.RunningHttp >= node.MaxHttpQueue {
 		return nil
 	}
 
-	dsInfo := &node.HealthInfo.Datasources[dsIdx]
+	dsInfo := &node.Datasources[dsIdx]
 
 	if !dsInfo.Active {
 		return nil
@@ -275,7 +270,7 @@ func collectStats(dsInfo *DatasourceInfo) {
 
 func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
 
-	httpUsage := float64(node.HealthInfo.RunningHttp) / float64(node.HealthInfo.MaxHttpQueue)
+	httpUsage := float64(node.RunningHttp) / float64(node.MaxHttpQueue)
 	dbUsage := float64(dsInfo.RunningQuery) / float64(dsInfo.MaxOpenConns)
 	txUsage := 1.0
 	if dsInfo.MaxTxConns > 0 {
@@ -286,7 +281,7 @@ func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics 
 	dbFree := 1 - clamp01(dbUsage)
 	txFree := 1 - clamp01(txUsage)
 	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.OpenConns))
-	uptimeScore := clamp01(float64(time.Since(node.HealthInfo.UpTime).Seconds()) / UPTIME_OK)
+	uptimeScore := clamp01(float64(time.Since(node.UpTime).Seconds()) / UPTIME_OK)
 
 	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
 	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_RATE_BAD)

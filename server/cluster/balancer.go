@@ -54,11 +54,11 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 
 		// RunningHttp count
 		b.SelfNode.Mu.Lock()
-		b.SelfNode.HealthInfo.RunningHttp++
+		b.SelfNode.RunningHttp++
 		b.SelfNode.Mu.Unlock()
 		defer func() {
 			b.SelfNode.Mu.Lock()
-			b.SelfNode.HealthInfo.RunningHttp--
+			b.SelfNode.RunningHttp--
 			b.SelfNode.Mu.Unlock()
 		}()
 
@@ -70,7 +70,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 
 		// Datasource指定がある場合はそのまま処理
 		if dsID != "" {
-			for idx, ds := range b.SelfNode.HealthInfo.Datasources {
+			for idx, ds := range b.SelfNode.Datasources {
 				if ds.DatasourceID == dsID {
 					next.ServeHTTP(w, PutCtxDsIdx(r, idx))
 					return
@@ -126,9 +126,9 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 	selfNode.Mu.Lock()
 	defer selfNode.Mu.Unlock()
 
-	scores := make([]*ScoreWithWeight, 0, len(selfNode.HealthInfo.Datasources))
+	scores := make([]*ScoreWithWeight, 0, len(selfNode.Datasources))
 
-	for dsIdx := range selfNode.HealthInfo.Datasources {
+	for dsIdx := range selfNode.Datasources {
 
 		score := selfNode.GetScore(dsIdx, tarDbName, endpoint)
 		if score == nil {
@@ -145,11 +145,11 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 	}
 
 	// 使用率80%以上なら、他のノードとの協調を試みる
-	if float64(selfNode.HealthInfo.RunningHttp)/float64(selfNode.HealthInfo.MaxHttpQueue) >= USAGE_THRESHOLD {
+	if float64(selfNode.RunningHttp)/float64(selfNode.MaxHttpQueue) >= USAGE_THRESHOLD {
 		return best, nil
 	}
 
-	randomDs := selfNode.HealthInfo.Datasources[bestRandom.exIndex]
+	randomDs := selfNode.Datasources[bestRandom.exIndex]
 	switch endpoint {
 	case EP_BeginTx:
 		if float64(randomDs.RunningTx)/float64(randomDs.MaxTxConns) >= USAGE_THRESHOLD {
@@ -170,7 +170,7 @@ func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT
 	for nodeIdx, node := range otherNodes {
 		node.Mu.RLock()
 
-		for dsIdx := range node.HealthInfo.Datasources {
+		for dsIdx := range node.Datasources {
 			score := node.GetScore(dsIdx, tarDbName, endpoint)
 			if score == nil {
 				continue

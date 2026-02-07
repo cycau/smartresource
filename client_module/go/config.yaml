@@ -1,0 +1,10 @@
+defaultSecretKey: "secret-key"
+# 省略時は Get("dbname") で指定。Get() 無引数で使う場合は設定する
+# defaultDatabase: "crm-system"
+
+clusterNodes:
+  - baseUrl: "http://localhost:5678"
+    secretKey: "secret-key"
+  - baseUrl: "http://localhost:5678"
+  - baseUrl: "http://localhost:5678"
+  - baseUrl: "http://localhost:5678"

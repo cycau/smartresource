@@ -307,7 +307,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 func (exec *ExecHandler) statsRequest(datasourceIdx int, delta int) {
 	exec.selfNode.Mu.Lock()
 
-	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
+	dsInfo := &exec.selfNode.Datasources[datasourceIdx]
 	dsInfo.RunningQuery += delta
 	if dsInfo.RunningQuery < 0 {
 		dsInfo.RunningQuery = 0
@@ -320,7 +320,7 @@ func (exec *ExecHandler) statsResult(datasourceIdx int, latencyMs int64, isError
 	exec.selfNode.Mu.Lock()
 
 	// Find or create datasource info
-	dsInfo := &exec.selfNode.HealthInfo.Datasources[datasourceIdx]
+	dsInfo := &exec.selfNode.Datasources[datasourceIdx]
 
 	dsInfo.StatsResult(latencyMs, isError, isTimeout)
 
