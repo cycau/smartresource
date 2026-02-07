@@ -56,7 +56,7 @@ func (r *Router) StartCollectHealthTicker() {
 			otherNodes = append(otherNodes, node)
 		}
 	}
-	r.balancer.OtherNodes = otherNodes
+	// r.balancer.OtherNodes = otherNodes // TODO: comment out for debug
 
 	r.balancer.SelfNode.Mu.Lock()
 	r.balancer.SelfNode.Status = cluster.SERVING
@@ -65,11 +65,13 @@ func (r *Router) StartCollectHealthTicker() {
 
 	go func() {
 		for {
-			time.Sleep(time.Duration(3000+rand.Intn(2000)) * time.Millisecond) // 3-5秒ランダム待ち
+			time.Sleep(time.Duration(2000+rand.Intn(2000)) * time.Millisecond) // 平均3(2-4)秒ランダム待ち
 			r.collectHealth(false)
 		}
 	}()
 }
+
+const HEALZ_ERROR_INTERVAL = 15 * time.Second
 
 func (r *Router) collectHealth(isSync bool) {
 	var wg sync.WaitGroup
@@ -78,8 +80,14 @@ func (r *Router) collectHealth(isSync bool) {
 		wg.Add(1)
 		go func(node *cluster.NodeInfo) {
 			defer wg.Done()
-			defer node.Mu.Unlock()
 
+			if node.Status == cluster.HEALZERR {
+				if time.Since(node.HealthInfo.CheckTime) < HEALZ_ERROR_INTERVAL {
+					return
+				}
+			}
+
+			defer node.Mu.Unlock()
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.BaseURL+"/healz", nil)
@@ -94,6 +102,7 @@ func (r *Router) collectHealth(isSync bool) {
 				log.Printf("Failed to do request for %s: %v", node.NodeID, err)
 				node.Mu.Lock()
 				node.Status = cluster.HEALZERR
+				node.HealthInfo.CheckTime = time.Now()
 				return
 			}
 			defer response.Body.Close()

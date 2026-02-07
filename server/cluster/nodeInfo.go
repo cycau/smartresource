@@ -55,26 +55,26 @@ type DatasourceInfo struct {
 	RunningQuery int `json:"runningQuery"`
 	RunningTx    int `json:"runningTx"`
 
-	LatencyP95Ms  int       `json:"latencyP95Ms"`
-	ErrorRate1m   float64   `json:"errorRate1m"`
-	TimeoutRate1m float64   `json:"timeoutRate1m"`
-	collectTime   time.Time `json:"-"`
+	LatencyP95Ms  int     `json:"latencyP95Ms"`
+	ErrorRate1m   float64 `json:"errorRate1m"`
+	TimeoutRate1m float64 `json:"timeoutRate1m"`
 
-	StatLatency  *prometheus.SummaryVec   `json:"-"`
-	StatTotal    *ratecounter.RateCounter `json:"-"`
-	StatErrors   *ratecounter.RateCounter `json:"-"`
-	StatTimeouts *ratecounter.RateCounter `json:"-"`
+	StatLatency   *prometheus.SummaryVec   `json:"-"`
+	StatTotal     *ratecounter.RateCounter `json:"-"`
+	StatErrors    *ratecounter.RateCounter `json:"-"`
+	StatTimeouts  *ratecounter.RateCounter `json:"-"`
+	collectedTime time.Time                `json:"-"`
 }
 
 /*****************************
  * initialize DatasourceInfo
  *****************************/
-const STAT_WINDOW_TIME = 5 * time.Minute
+const STAT_WINDOW_INTERVAL = 5 * time.Minute
 
 func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 	var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Objectives: map[float64]float64{0.95: 0.01},
-		MaxAge:     STAT_WINDOW_TIME,
+		MaxAge:     STAT_WINDOW_INTERVAL,
 	}, []string{"latency"})
 
 	return &DatasourceInfo{
@@ -86,11 +86,11 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 		MaxIdleConns: config.MaxIdleConns,
 		MaxTxConns:   config.MaxTxConns,
 
-		StatLatency:  statLatency,
-		StatTotal:    ratecounter.NewRateCounter(STAT_WINDOW_TIME),
-		StatErrors:   ratecounter.NewRateCounter(STAT_WINDOW_TIME),
-		StatTimeouts: ratecounter.NewRateCounter(STAT_WINDOW_TIME),
-		collectTime:  time.Now().Add(-STAT_WINDOW_TIME),
+		StatLatency:   statLatency,
+		StatTotal:     ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+		StatErrors:    ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+		StatTimeouts:  ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+		collectedTime: time.Now().Add(-STAT_WINDOW_INTERVAL),
 	}
 }
 
@@ -238,7 +238,7 @@ func clamp01(x float64) float64 {
 	return math.Min(1.0, math.Max(0.0, x))
 }
 
-const STAT_COLLECT_INTERVAL = 2 * time.Second
+const STAT_COLLECT_INTERVAL = 1500 * time.Millisecond
 
 func collectStats(dsInfo *DatasourceInfo) {
 
@@ -247,7 +247,7 @@ func collectStats(dsInfo *DatasourceInfo) {
 		return
 	}
 
-	if time.Since(dsInfo.collectTime) < STAT_COLLECT_INTERVAL {
+	if time.Since(dsInfo.collectedTime) < STAT_COLLECT_INTERVAL {
 		return
 	}
 
@@ -270,7 +270,7 @@ func collectStats(dsInfo *DatasourceInfo) {
 	dsInfo.LatencyP95Ms = int(p95)
 	dsInfo.ErrorRate1m = errorRate1m
 	dsInfo.TimeoutRate1m = timeoutRate1m
-	dsInfo.collectTime = time.Now()
+	dsInfo.collectedTime = time.Now()
 }
 
 func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
