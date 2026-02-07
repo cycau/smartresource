@@ -80,7 +80,12 @@ func (s *Switcher) request(nodeIdx int, url string, method string, query map[str
 		if redirectCount <= 0 {
 			return nil, fmt.Errorf("redirect count exceeded")
 		}
-		time.Sleep(time.Duration((3-redirectCount)*300) * time.Millisecond)
+		if redirectCount == 2 {
+			time.Sleep(300 * time.Millisecond)
+		}
+		if redirectCount == 1 {
+			time.Sleep(500 * time.Millisecond)
+		}
 
 		redirectNodeId := resp.Header.Get("Location")
 		if redirectNodeId == "" {
