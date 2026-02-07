@@ -47,7 +47,7 @@ func (s *Switcher) Init(nodes []NodeEntry) error {
 	return nil
 }
 
-func (s *Switcher) request(nodeIdx int, url string, method string, query map[string]string, body any) (*http.Response, error) {
+func (s *Switcher) request(nodeIdx int, url string, method string, query map[string]string, body any, retryCount int) (*http.Response, error) {
 	node := s.candidates[nodeIdx]
 	baseURL := node.BaseURL
 	u := baseURL + url
@@ -76,7 +76,7 @@ func (s *Switcher) request(nodeIdx int, url string, method string, query map[str
 	}
 	if resp.StatusCode == http.StatusTemporaryRedirect {
 		resp.Body.Close()
-		return nil, fmt.Errorf("redirect to unknown node: %s", resp.Header.Get("Location"))
+		return s.request(nodeIdx, resp.Header.Get("Location"), method, query, body, retryCount-1)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// TODO: retry
