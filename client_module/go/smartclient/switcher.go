@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type Switcher struct {
@@ -47,7 +48,7 @@ func (s *Switcher) Init(nodes []NodeEntry) error {
 	return nil
 }
 
-func (s *Switcher) request(nodeIdx int, url string, method string, query map[string]string, body any, retryCount int) (*http.Response, error) {
+func (s *Switcher) request(nodeIdx int, url string, method string, query map[string]string, body any, redirectCount int) (*http.Response, error) {
 	node := s.candidates[nodeIdx]
 	baseURL := node.BaseURL
 	u := baseURL + url
@@ -76,10 +77,28 @@ func (s *Switcher) request(nodeIdx int, url string, method string, query map[str
 	}
 	if resp.StatusCode == http.StatusTemporaryRedirect {
 		resp.Body.Close()
-		return s.request(nodeIdx, resp.Header.Get("Location"), method, query, body, retryCount-1)
+		if redirectCount <= 0 {
+			return nil, fmt.Errorf("redirect count exceeded")
+		}
+		time.Sleep(time.Duration((3-redirectCount)*300) * time.Millisecond)
+
+		redirectNodeId := resp.Header.Get("Location")
+		if redirectNodeId == "" {
+			return nil, fmt.Errorf("redirect location is empty")
+		}
+		nodeIdx = -1
+		for i := range s.candidates {
+			if s.candidates[i].NodeID == redirectNodeId {
+				nodeIdx = i
+				break
+			}
+		}
+		if nodeIdx == -1 {
+			return nil, fmt.Errorf("redirect node id not found")
+		}
+		return s.request(nodeIdx, redirectNodeId, method, query, body, redirectCount-1)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// TODO: retry
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		return nil, fmt.Errorf("query status %d: %s", resp.StatusCode, string(bodyBytes))

@@ -112,7 +112,7 @@ func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"params": params,
 	}
 	q := map[string]string{"_DbName": c.datasourceName}
-	resp, err := c.executor.request(nodeIdx, "/execute", http.MethodPost, q, body, 2)
+	resp, err := c.executor.request(nodeIdx, "/execute", http.MethodPost, q, body, 3)
 	if err != nil {
 		return nil, err
 	}
