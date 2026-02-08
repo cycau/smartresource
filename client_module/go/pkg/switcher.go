@@ -17,7 +17,7 @@ type Switcher struct {
 	db         string
 }
 
-var switcher *Switcher
+var switcher = &Switcher{}
 
 func (s *Switcher) Init(nodes []NodeEntry) error {
 	candidates := make([]NodeInfo, len(nodes))
@@ -34,7 +34,7 @@ func (s *Switcher) Init(nodes []NodeEntry) error {
 				haveError = true
 				return
 			}
-			health.BaseURL = node.BaseURL
+			health.BaseURL = node.BaseURL + "/rdb"
 			health.SecretKey = node.SecretKey
 			candidates[i] = *health
 		}(i, node)
@@ -101,7 +101,8 @@ func (s *Switcher) request(nodeIdx int, url string, method string, query map[str
 		if nodeIdx == -1 {
 			return nil, fmt.Errorf("redirect node id not found")
 		}
-		return s.request(nodeIdx, redirectNodeId, method, query, body, redirectCount-1)
+		log.Printf("redirect to node %s, redirectCount: %d", redirectNodeId, redirectCount)
+		return s.request(nodeIdx, url, method, query, body, redirectCount-1)
 	}
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -112,10 +113,14 @@ func (s *Switcher) request(nodeIdx int, url string, method string, query map[str
 }
 
 func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, err error) {
+	if len(s.candidates) == 0 {
+		return -1, fmt.Errorf("Not initialized yet")
+	}
+
 	type candidate struct {
-		node   *NodeInfo
-		dsIdx  int
-		weight float64
+		node    *NodeInfo
+		nodeIdx int
+		weight  float64
 	}
 	var candidates []candidate
 
@@ -150,7 +155,7 @@ func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int
 			if w <= 0 {
 				continue
 			}
-			candidates = append(candidates, candidate{node: n, dsIdx: j, weight: w})
+			candidates = append(candidates, candidate{node: n, nodeIdx: i, weight: w})
 		}
 	}
 	if len(candidates) == 0 {
@@ -161,14 +166,14 @@ func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int
 		total += c.weight
 	}
 	r := rand.Float64() * total
-	for idx, cand := range candidates {
+	for _, cand := range candidates {
 		r -= cand.weight
 		if r <= 0 {
-			return idx, nil
+			return cand.nodeIdx, nil
 		}
 	}
 
-	return len(candidates) - 1, nil
+	return 0, nil
 }
 
 func fetchHealz(baseUrl string, secretKey string) (*NodeInfo, error) {

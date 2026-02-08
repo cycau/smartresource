@@ -50,11 +50,11 @@ type Client struct {
 }
 
 // Get は databaseName 用のクライアントを返す。空の場合は defaultDatabase を使用する
-func Get(datasourceName string) (*Client, error) {
+func Get(datasourceName string) *Client {
 	return &Client{
 		datasourceName: datasourceName,
 		executor:       switcher,
-	}, nil
+	}
 }
 
 func ParamVal(val any, valType ValueType) ParamValue {
@@ -76,6 +76,7 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	if err != nil {
 		return nil, err
 	}
+	//log.Printf("Query: %s, %+v, %+v, nodeIdx: %d", sql, params, opts, nodeIdx)
 
 	body := map[string]any{
 		"sql":    sql,

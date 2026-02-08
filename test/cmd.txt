@@ -18,6 +18,14 @@ curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -
 
 curl -X POST -H "Content-Type: application/json" -H "X-Secret-Key: secret-key" -d "@query.data.txt" http://localhost:5678/rdb/query?_DbName=crm-system | jq .
 
+curl -X POST "http://localhost:5678/rdb/query?_DbName=crm-system" \
+  -H "X-Secret-Key: secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SQL": "SELECT * FROM users",
+    "Params": [
+    ]
+  }'  | jq
 
 curl -X POST "http://localhost:5678/rdb/query?_DbName=crm-system" \
   -H "X-Secret-Key: secret-key" \

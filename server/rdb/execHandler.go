@@ -92,7 +92,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
-	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
+	log.Printf("### Executing DsIDX: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
 	// Update health info: increment RunningSql
 	exec.statsRequest(dsIDX, 1)
@@ -396,8 +396,17 @@ func convertParam(p ParamValue) (any, error) {
 		if val, ok := p.Value.(int32); ok {
 			return val, nil
 		}
+		if val, ok := p.Value.(float64); ok {
+			return int32(val), nil
+		}
+		if val, ok := p.Value.(int); ok {
+			return int32(val), nil
+		}
+		if val, ok := p.Value.(int64); ok {
+			return int32(val), nil
+		}
 		if val, ok := p.Value.(string); ok {
-			var intVal int32
+			var intVal int
 			_, err := fmt.Sscanf(val, "%d", &intVal)
 			if err != nil {
 				return nil, fmt.Errorf("invalid int32 string: %v", err)
@@ -408,6 +417,15 @@ func convertParam(p ParamValue) (any, error) {
 	case LONG:
 		if val, ok := p.Value.(int64); ok {
 			return val, nil
+		}
+		if val, ok := p.Value.(float64); ok {
+			return int64(val), nil
+		}
+		if val, ok := p.Value.(int); ok {
+			return int64(val), nil
+		}
+		if val, ok := p.Value.(int32); ok {
+			return int64(val), nil
 		}
 		if val, ok := p.Value.(string); ok {
 			var intVal int64

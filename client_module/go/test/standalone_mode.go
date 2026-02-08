@@ -1,23 +1,18 @@
-package sclient_test
+package test
 
 import (
 	"fmt"
 
-	"smartresource/clientmodule/go/smartclient"
+	smartclient "smartresource/clientmodule/go/pkg"
 )
 
 // サンプル用の一時 config を作成し、Init が config を読むことと
 // Get が未初期化でエラーになることを確認する
-func ExampleInit() {
+func Test1() {
 
-	// 一時 config を作成（healz は失敗するが Init の読み込みまでは動く）
+	dsClient := smartclient.Get("crm-system")
 
-	dsClient, err := smartclient.Get("crm-system")
-	if err != nil {
-		fmt.Println("Get error:", err)
-	}
-
-	queryResult, err := dsClient.Query(
+	_, err := dsClient.Query(
 		"SELECT * FROM users",
 		smartclient.Params{},
 		smartclient.QueryOptions{
@@ -26,21 +21,24 @@ func ExampleInit() {
 		},
 	)
 	if err != nil {
-		fmt.Println("Query error:", err)
+		fmt.Println("Test error:", err)
 	}
 
-	fmt.Println(queryResult.Rows)
+	//fmt.Printf("queryResult: %+v\n", queryResult)
 
-	execResult, err := dsClient.Execute(
-		"INSERT INTO users (name, email) VALUES ($1, $2)",
-		smartclient.Params{
-			smartclient.ParamVal(1, smartclient.ValueType_INT),
-			smartclient.ParamVal("john@example.com", smartclient.ValueType_STRING),
-		},
-	)
-	if err != nil {
-		fmt.Println("Execute error:", err)
-		return
-	}
-	fmt.Println(execResult.EffectedRows)
+	// id := rand.Intn(100000000)
+	// execResult, err := dsClient.Execute(
+	// 	"INSERT INTO users (id, name, email, active) VALUES ($1, $2, $3, $4)",
+	// 	smartclient.Params{
+	// 		smartclient.ParamVal(strconv.Itoa(id), smartclient.ValueType_STRING),
+	// 		smartclient.ParamVal("XXX_"+strconv.Itoa(id), smartclient.ValueType_STRING),
+	// 		smartclient.ParamVal("john@example.com", smartclient.ValueType_STRING),
+	// 		smartclient.ParamVal(true, smartclient.ValueType_BOOL),
+	// 	},
+	// )
+	// if err != nil {
+	// 	fmt.Println("Execute error:", err)
+	// 	return
+	// }
+	// fmt.Printf("execResult: %+v\n", execResult)
 }
