@@ -9,14 +9,36 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type endpointType int
+type EndpointType int
 
 const (
-	epQuery endpointType = iota
-	epExecute
-	epBeginTx
-	epOther
+	EP_QUERY EndpointType = iota
+	EP_EXECUTE
+	EP_BEGIN_TX
+	EP_COMMIT_TX
+	EP_ROLLBACK_TX
+	EP_DONE_TX
+	EP_OTHER
 )
+
+func GetEndpointPath(ep EndpointType) string {
+	switch ep {
+	case EP_QUERY:
+		return "/query"
+	case EP_EXECUTE:
+		return "/execute"
+	case EP_BEGIN_TX:
+		return "/tx/begin"
+	case EP_COMMIT_TX:
+		return "/tx/commit"
+	case EP_ROLLBACK_TX:
+		return "/tx/rollback"
+	case EP_DONE_TX:
+		return "/tx/done"
+	default:
+		return "/other"
+	}
+}
 
 func Init(nodes []NodeEntry) error {
 	return switcher.Init(nodes)
@@ -72,11 +94,6 @@ func ParamVal(val any, valType ValueType) ParamValue {
 }
 
 func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
-	nodeIdx, err := c.executor.selectNode(c.datasourceName, epQuery)
-	if err != nil {
-		return nil, err
-	}
-	//log.Printf("Query: %s, %+v, %+v, nodeIdx: %d", sql, params, opts, nodeIdx)
 
 	body := map[string]any{
 		"sql":    sql,
@@ -90,7 +107,7 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	}
 	q := map[string]string{"_DbName": c.datasourceName}
 
-	resp, err := c.executor.request(nodeIdx, "/query", http.MethodPost, q, body, 3)
+	resp, err := c.executor.Request(c.datasourceName, EP_QUERY, http.MethodPost, q, body, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -104,16 +121,13 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 }
 
 func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
-	nodeIdx, err := c.executor.selectNode(c.datasourceName, epExecute)
-	if err != nil {
-		return nil, err
-	}
+
 	body := map[string]any{
 		"sql":    sql,
 		"params": params,
 	}
 	q := map[string]string{"_DbName": c.datasourceName}
-	resp, err := c.executor.request(nodeIdx, "/execute", http.MethodPost, q, body, 3)
+	resp, err := c.executor.Request(c.datasourceName, EP_EXECUTE, http.MethodPost, q, body, 3)
 	if err != nil {
 		return nil, err
 	}

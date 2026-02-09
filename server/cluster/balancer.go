@@ -7,6 +7,7 @@ import (
 	"net/http"
 	. "smartdatastream/server/global"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -40,7 +41,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			return
 		}
 
-		err, endpoint, tarDbName, txID, dsID := parseRequest(r)
+		err, endpoint, tarDbName, txID, dsID, redirectCount := parseRequest(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -89,6 +90,15 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		log.Printf("Self Best Score: %+v -> %+v", selfBestScore, selfRecommendDs)
 		if selfRecommendDs != nil {
 			next.ServeHTTP(w, PutCtxDsIdx(r, selfRecommendDs.exIndex))
+			return
+		}
+		// Client側で、最後のリダイレクトの場合（リダイレクトを受け付けない場合）
+		if redirectCount < 2 {
+			if selfBestScore == nil {
+				http.Error(w, fmt.Sprintf("No resource to process on this node. Node[%s], RedirectCount[%d]", b.SelfNode.NodeID, redirectCount), http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
 			return
 		}
 
@@ -239,28 +249,29 @@ func selectBestRandomScore(scores []*ScoreWithWeight) (bestScore *ScoreWithWeigh
 }
 
 // parse request and return endpoint, database name, and transaction ID
-func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName string, txID string, dsID string) {
+func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName string, txID string, dsID string, redirectCount int) {
 
 	query := r.URL.Query()
 	dbName = query.Get(QUERYP_DB_NAME)
 	txID = query.Get(QUERYP_TX_ID)
 	dsID = query.Get(QUERYP_DS_ID)
+	redirectCount, err = strconv.Atoi(query.Get(QUERYP_REDIRECT_COUNT))
 	endpoint = GetEndpointType(r.URL.Path)
 
 	switch endpoint {
 	case EP_Query:
 		if dbName == "" && txID == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID
+			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
 		}
 	case EP_Execute:
 		if dbName == "" && txID == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID
+			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
 		}
 	case EP_BeginTx:
 		if dbName == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _DsID ]"), endpoint, dbName, txID, dsID
+			return fmt.Errorf("require query parameters [ _DbName ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
 		}
 	}
 
-	return nil, endpoint, dbName, txID, dsID
+	return nil, endpoint, dbName, txID, dsID, redirectCount
 }

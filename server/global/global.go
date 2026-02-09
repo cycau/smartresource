@@ -31,6 +31,7 @@ type DatasourceConfig struct {
 const QUERYP_DB_NAME = "_DbName"
 const QUERYP_TX_ID = "_TxID"
 const QUERYP_DS_ID = "_DsID"
+const QUERYP_REDIRECT_COUNT = "_RCount"
 
 const EP_PATH_QUERY = "/query"
 const EP_PATH_EXECUTE = "/execute"

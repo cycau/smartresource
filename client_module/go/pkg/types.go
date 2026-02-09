@@ -1,6 +1,9 @@
 package smartclient
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // ValType はパラメータの型（JSON の "type" に使用）
 type ValueType string
@@ -91,6 +94,7 @@ type NodeInfo struct {
 	UpTime       time.Time        `json:"upTime"`
 	CheckTime    time.Time        `json:"checkTime"`
 	Datasources  []DatasourceInfo `json:"datasources"`
+	Mu           sync.RWMutex     `json:"-"`
 }
 
 type DatasourceInfo struct {
