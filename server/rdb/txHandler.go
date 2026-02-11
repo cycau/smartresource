@@ -13,9 +13,8 @@ import (
 
 // BeginTxRequest represents the request body for /v1/rdb/tx/begin
 type BeginTxRequest struct {
-	ClientNodeIndex int    `json:"clientNodeIndex"`
-	IsolationLevel  string `json:"isolationLevel,omitempty"`
-	TimeoutSec      *int   `json:"timeoutSec,omitempty"`
+	IsolationLevel string `json:"isolationLevel,omitempty"`
+	TimeoutSec     *int   `json:"timeoutSec,omitempty"`
 }
 
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
@@ -53,7 +52,7 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := tx.txManager.Begin(dsIDX, isolationLevel, req.TimeoutSec, req.ClientNodeIndex)
+	txEntry, err := tx.txManager.Begin(dsIDX, isolationLevel, req.TimeoutSec)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")

@@ -90,8 +90,6 @@ type NodeInfo struct {
 	NodeID       string           `json:"nodeId"`
 	Status       string           `json:"status"`
 	MaxHttpQueue int              `json:"maxHttpQueue"`
-	RunningHttp  int              `json:"runningHttp"`
-	UpTime       time.Time        `json:"upTime"`
 	CheckTime    time.Time        `json:"checkTime"`
 	Datasources  []DatasourceInfo `json:"datasources"`
 	Mu           sync.RWMutex     `json:"-"`
@@ -105,8 +103,4 @@ type DatasourceInfo struct {
 	MaxOpenConns int    `json:"maxOpenConns"`
 	MaxIdleConns int    `json:"maxIdleConns"`
 	MaxTxConns   int    `json:"maxTxConns"`
-	OpenConns    int    `json:"openConns"`
-	IdleConns    int    `json:"idleConns"`
-	RunningQuery int    `json:"runningQuery"`
-	RunningTx    int    `json:"runningTx"`
 }

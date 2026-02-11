@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,50 +21,106 @@ type Switcher struct {
 
 var switcher = &Switcher{}
 
-func (s *Switcher) Init(nodes []NodeEntry) error {
-	candidates := make([]NodeInfo, len(nodes))
+func (s *Switcher) Init(entries []NodeEntry) error {
+	candidates := make([]NodeInfo, len(entries))
 
-	haveError := false
+	errNode := ""
 	var wg sync.WaitGroup
-	for i, node := range nodes {
+	for i, entry := range entries {
 		wg.Add(1)
-		go func(i int, node NodeEntry) {
+
+		candidates[i].BaseURL = entry.BaseURL
+		candidates[i].SecretKey = entry.SecretKey
+		candidates[i].CheckTime = time.Now().Add(-1 * time.Hour)
+
+		go func(i int, node *NodeInfo) {
 			defer wg.Done()
-			health, err := fetchHealz(node.BaseURL, node.SecretKey)
+			nodeInfo, err := fetchNodeInfo(node.BaseURL, node.SecretKey, node.CheckTime)
 			if err != nil {
-				log.Printf("healz %s: %v", node.BaseURL, err)
-				haveError = true
+				log.Printf("fetch node info %s: %v", node.BaseURL, err)
+				errNode = node.BaseURL
 				return
 			}
-			health.BaseURL = node.BaseURL + "/rdb"
-			health.SecretKey = node.SecretKey
-			candidates[i] = *health
-		}(i, node)
+			node.NodeID = nodeInfo.NodeID
+			node.Status = nodeInfo.Status
+			node.MaxHttpQueue = nodeInfo.MaxHttpQueue
+			node.Datasources = nodeInfo.Datasources
+			node.CheckTime = nodeInfo.CheckTime
+		}(i, &candidates[i])
 	}
 	wg.Wait()
 	s.candidates = candidates
 
-	if haveError {
-		return fmt.Errorf("failed to fetch healz")
+	if errNode != "" {
+		return fmt.Errorf("failed to connect to node. %s", errNode)
 	}
 	return nil
 }
 
-func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, error) {
+func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, query map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
+	if err != nil {
+		return nil, -1, err
+	}
+	node := &s.candidates[nodeIdx]
+
+	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, redirectCount)
+	if resp == nil {
+		return nil, nodeIdx, err
+	}
+	defer resp.Body.Close()
+	// OK response
+	if err == nil {
+		return resp, nodeIdx, nil
+	}
+
+	// network error or connection timeout or capacity error
+	// try to reflect healz and select another node
+	if resp.StatusCode != http.StatusBadGateway &&
+		resp.StatusCode != http.StatusGatewayTimeout &&
+		resp.StatusCode != http.StatusServiceUnavailable {
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, nodeIdx, fmt.Errorf("Request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	node.Mu.Lock()
+	switch resp.StatusCode {
+	case http.StatusBadGateway:
+		node.Status = "DRAINING"
+	case http.StatusGatewayTimeout:
+		node.Status = "DRAINING"
+	case http.StatusServiceUnavailable:
+		node.Datasources[dsIdx].Active = false
+	}
+	node.CheckTime = time.Now()
+	node.Mu.Unlock()
+
+	if retryCount < 0 {
+		return nil, nodeIdx, fmt.Errorf("Failed to connect to service. Retry count exceeded.")
+	}
+
+	// retry
+	return s.Request(dbName, endpoint, method, query, body, redirectCount, retryCount-1)
+}
+
+func (s *Switcher) RequestTx(txId string, endpoint EndpointType, method string, body any) (*http.Response, error) {
+	nodeIdx, err := extractNodeIdx(txId)
 	if err != nil {
 		return nil, err
 	}
-	return s.request(nodeIdx, dsIdx, endpoint, method, query, body, redirectCount)
+	node := &s.candidates[nodeIdx]
+	query := map[string]string{"_TxID": txId}
+	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, 1)
+	return resp, err
 }
-func (s *Switcher) request(nodeIdx int, dsIdx int, endpoint EndpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, error) {
 
-	node := s.candidates[nodeIdx]
-	baseURL := node.BaseURL
-	u := baseURL + GetEndpointPath(endpoint)
+func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint EndpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, int, error) {
+
+	u := baseURL + "/rdb" + GetEndpointPath(endpoint)
 	req, err := http.NewRequest(method, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, nodeIdx, err
 	}
 	q := req.URL.Query()
 	for k, v := range query {
@@ -72,131 +129,159 @@ func (s *Switcher) request(nodeIdx int, dsIdx int, endpoint EndpointType, method
 	q.Set("_RCount", strconv.Itoa(redirectCount))
 
 	req.URL.RawQuery = q.Encode()
-	req.Header.Set("X-Secret-Key", node.SecretKey)
+	req.Header.Set("X-Secret-Key", secretKey)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	if body != nil {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
+			return nil, nodeIdx, err
 		}
 		req.Body = io.NopCloser(&buf)
 		req.ContentLength = int64(buf.Len())
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nodeIdx, err
 	}
-	if resp.StatusCode == http.StatusTemporaryRedirect {
-		resp.Body.Close()
-		if redirectCount <= 0 {
-			return nil, fmt.Errorf("Redirect count exceeded.")
-		}
-		if redirectCount == 2 {
-			time.Sleep(300 * time.Millisecond)
-		}
-		if redirectCount == 1 {
-			time.Sleep(500 * time.Millisecond)
-		}
 
-		redirectNodeId := resp.Header.Get("Location")
-		if redirectNodeId == "" {
-			return nil, fmt.Errorf("Redirect location is empty.")
-		}
-		nodeIdx = -1
-		for i := range s.candidates {
-			if s.candidates[i].NodeID == redirectNodeId {
-				nodeIdx = i
-				break
-			}
-		}
-		if nodeIdx == -1 {
-			return nil, fmt.Errorf("Redirect node id not found. Node[%s]", redirectNodeId)
-		}
-		log.Printf("Redirect to node %s, RedirectCount: %d", redirectNodeId, redirectCount)
-		return s.request(nodeIdx, dsIdx, endpoint, method, query, body, redirectCount-1)
+	if resp.StatusCode == http.StatusOK {
+		return resp, nodeIdx, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		// try else node
-		node := &s.candidates[nodeIdx]
-		node.Mu.Lock()
-		node.Datasources[dsIdx].Active = false
-		node.Mu.Unlock()
-		go func() {
-			node.Mu.Lock()
-			if time.Since(node.CheckTime) < 5*time.Second {
-				node.Mu.Unlock()
-				return
-			}
-			node.CheckTime = time.Now()
-			node.Mu.Unlock()
 
-			time.Sleep(5 * time.Second)
-			health, err := fetchHealz(node.BaseURL, node.SecretKey)
-			if err != nil {
-				log.Printf("healz %s: %v", node.BaseURL, err)
-				return
-			}
-			node.Mu.Lock()
-			node.Datasources = health.Datasources
-			node.CheckTime = time.Now()
-			node.Mu.Unlock()
-		}()
-
-		nodeIdx, dsIdx, err = s.selectNode(node.Datasources[dsIdx].DatabaseName, endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("query status %d: %s", resp.StatusCode, string(bodyBytes))
-		}
-		return s.request(nodeIdx, dsIdx, endpoint, method, query, body, redirectCount-1)
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		return resp, nodeIdx, fmt.Errorf("query status %d", resp.StatusCode)
 	}
-	return resp, nil
+
+	// redirect control
+	if redirectCount == 1 {
+		time.Sleep(300 * time.Millisecond)
+	}
+	if redirectCount == 0 {
+		time.Sleep(500 * time.Millisecond)
+	}
+	if redirectCount < 0 {
+		return nil, nodeIdx, fmt.Errorf("Redirect count exceeded.")
+	}
+
+	redirectNodeId := resp.Header.Get("Location")
+	if redirectNodeId == "" {
+		return nil, nodeIdx, fmt.Errorf("Redirect location is empty.")
+	}
+
+	for i := range s.candidates {
+		redirectNode := &s.candidates[i]
+		if redirectNode.NodeID == redirectNodeId {
+			log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
+			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, query, body, redirectCount-1)
+		}
+	}
+
+	return nil, nodeIdx, fmt.Errorf("Redirect node id not found. Node[%s]", redirectNodeId)
 }
 
+const PROBLEMATIC_NODE_CHECK_INTERVAL = 15 * time.Second
+
 func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int, dsIdx int, err error) {
-	if len(s.candidates) == 0 {
-		return -1, -1, fmt.Errorf("Not initialized yet")
+	nodeIdx, dsIdx, problematicNodes, err := s.selectRandomNode(dbName, endpoint)
+
+	if err != nil {
+		// full scan and try again
+		wg := sync.WaitGroup{}
+		for _, i := range problematicNodes {
+			n := &s.candidates[i]
+			n.Mu.Lock()
+			if time.Since(n.CheckTime) < PROBLEMATIC_NODE_CHECK_INTERVAL {
+				n.Mu.Unlock()
+				continue
+			}
+
+			wg.Add(1)
+			go func(tarNode *NodeInfo) {
+				defer tarNode.Mu.Unlock()
+				defer wg.Done()
+
+				nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey, tarNode.CheckTime)
+				tarNode.CheckTime = time.Now()
+				if err != nil {
+					log.Printf("Failed to fetch node info %s: %v", tarNode.BaseURL, err)
+					tarNode.Status = "HEALZERR"
+					return
+				}
+				tarNode.NodeID = nodeInfo.NodeID
+				tarNode.Status = nodeInfo.Status
+				tarNode.MaxHttpQueue = nodeInfo.MaxHttpQueue
+				tarNode.Datasources = nodeInfo.Datasources
+			}(n)
+		}
+		wg.Wait()
+
+		nodeIdx, dsIdx, _, err = s.selectRandomNode(dbName, endpoint)
+		return nodeIdx, dsIdx, err
 	}
 
-	type candidate struct {
-		node    *NodeInfo
-		nodeIdx int
-		dsIdx   int
-		weight  float64
+	// recover problematic nodes for next request
+	for _, i := range problematicNodes {
+		n := &s.candidates[i]
+		n.Mu.Lock()
+		if time.Since(n.CheckTime) < PROBLEMATIC_NODE_CHECK_INTERVAL {
+			n.Mu.Unlock()
+			continue
+		}
+
+		go func(tarNode *NodeInfo) {
+			defer tarNode.Mu.Unlock()
+
+			nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey, tarNode.CheckTime)
+			tarNode.CheckTime = time.Now()
+			if err != nil {
+				log.Printf("Failed to fetch node info %s: %v", tarNode.BaseURL, err)
+				tarNode.Status = "HEALZERR"
+				return
+			}
+			tarNode.NodeID = nodeInfo.NodeID
+			tarNode.Status = nodeInfo.Status
+			tarNode.MaxHttpQueue = nodeInfo.MaxHttpQueue
+			tarNode.Datasources = nodeInfo.Datasources
+		}(n)
 	}
-	var candidates []candidate
+
+	return nodeIdx, dsIdx, err
+}
+
+type dsCandidate struct {
+	nodeIdx int
+	dsIdx   int
+	weight  float64
+}
+
+func (s *Switcher) selectRandomNode(dbName string, endpoint EndpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
+	if len(s.candidates) == 0 {
+		return -1, -1, nil, fmt.Errorf("Node Candidates are not initialized yet.")
+	}
+
+	var dsCandidates []dsCandidate
+	var nodeIndexes []int
 
 	for i := range s.candidates {
 		n := &s.candidates[i]
 		n.Mu.RLock()
 
 		if n.Status != "SERVING" {
-			if time.Since(n.CheckTime) < 5*time.Second {
-				n.Mu.Unlock()
-				continue
+			if time.Since(n.CheckTime) > PROBLEMATIC_NODE_CHECK_INTERVAL {
+				nodeIndexes = append(nodeIndexes, i)
 			}
-			n.CheckTime = time.Now()
-			n.Mu.Unlock()
-
-			health, err := fetchHealz(n.BaseURL, n.SecretKey)
-			if err != nil {
-				log.Printf("healz %s: %v", n.BaseURL, err)
-			}
-
-			n.Mu.Lock()
-			n.Status = health.Status
-			n.Datasources = health.Datasources
-
-			if n.Status != "SERVING" {
-				n.Mu.Unlock()
-				continue
-			}
+			n.Mu.RUnlock()
+			continue
 		}
 
-		defer n.Mu.RUnlock()
+		problematic := false
 		for j := range n.Datasources {
 			ds := &n.Datasources[j]
-			if !ds.Active || ds.DatabaseName != dbName {
+			if ds.DatabaseName != dbName {
+				continue
+			}
+			if !ds.Active {
+				problematic = true
 				continue
 			}
 			if ds.Readonly && (endpoint == EP_EXECUTE || endpoint == EP_BEGIN_TX) {
@@ -205,6 +290,7 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 			if endpoint == EP_BEGIN_TX && ds.MaxTxConns == 0 {
 				continue
 			}
+
 			var w float64
 			switch endpoint {
 			case EP_QUERY:
@@ -219,34 +305,45 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 			if w <= 0 {
 				continue
 			}
-			candidates = append(candidates, candidate{node: n, nodeIdx: i, dsIdx: j, weight: w})
+			dsCandidates = append(dsCandidates, dsCandidate{nodeIdx: i, dsIdx: j, weight: w})
+		}
+		n.Mu.RUnlock()
+
+		if problematic && time.Since(n.CheckTime) > PROBLEMATIC_NODE_CHECK_INTERVAL {
+			nodeIndexes = append(nodeIndexes, i)
 		}
 	}
-	if len(candidates) == 0 {
-		return -1, -1, fmt.Errorf("No available datasource for database %s and endpoint type %d", dbName, endpoint)
+
+	if len(dsCandidates) == 0 {
+		return -1, -1, nodeIndexes, fmt.Errorf("No available datasource for database %s and endpoint type %d", dbName, endpoint)
 	}
 	total := 0.0
-	for _, c := range candidates {
+	for _, c := range dsCandidates {
 		total += c.weight
 	}
 	r := rand.Float64() * total
-	for _, cand := range candidates {
+	for _, cand := range dsCandidates {
 		r -= cand.weight
 		if r <= 0 {
-			return cand.nodeIdx, cand.dsIdx, nil
+			return cand.nodeIdx, cand.dsIdx, nodeIndexes, nil
 		}
 	}
 
-	return -1, -1, nil
+	return -1, -1, nodeIndexes, fmt.Errorf("No available datasource for database %s and endpoint type %d", dbName, endpoint)
 }
 
-func fetchHealz(baseUrl string, secretKey string) (*NodeInfo, error) {
-	req, err := http.NewRequest("GET", baseUrl+"/healz", nil)
+func fetchNodeInfo(baseURL string, secretKey string, checkTime time.Time) (*NodeInfo, error) {
+	if time.Since(checkTime) < 5*time.Second {
+		return nil, nil
+	}
+
+	req, err := http.NewRequest("GET", baseURL+"/healz", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Secret-Key", secretKey)
 	resp, err := http.DefaultClient.Do(req)
+
 	if err != nil {
 		return nil, err
 	}
@@ -255,10 +352,29 @@ func fetchHealz(baseUrl string, secretKey string) (*NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var nodeHealth NodeInfo
-	err = json.Unmarshal(body, &nodeHealth)
+	var nodeInfo NodeInfo
+	err = json.Unmarshal(body, &nodeInfo)
 	if err != nil {
 		return nil, err
 	}
-	return &nodeHealth, nil
+
+	return &nodeInfo, nil
+}
+
+func extractNodeIdx(txId string) (int, error) {
+	// Check size
+	if len(txId) < 20 {
+		return -1, fmt.Errorf("invalid txId size")
+	}
+
+	idx := strings.LastIndex(txId, ".")
+	if idx == -1 {
+		return -1, fmt.Errorf("invalid txId format")
+	}
+	nodeIdx, err := strconv.ParseInt(txId[idx+1:], 10, 8)
+	if err != nil {
+		return -1, err
+	}
+
+	return int(nodeIdx), nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 /**************************************************
@@ -25,15 +26,14 @@ func GetTx(datasourceName string, isolationLevel IsolationLevel) (*TxClient, err
 
 	return &TxClient{
 		datasourceName: datasourceName,
-		nodeIdx:        nodeIdx,
-		txId:           txId,
+		txId:           txId + "." + strconv.Itoa(nodeIdx),
 		executor:       switcher,
 	}, nil
 }
 
 func beginTx(datasourceName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
 
-	resp, err := switcher.Request(datasourceName, EP_BEGIN_TX, http.MethodPost, map[string]string{"_DsID": datasourceName}, map[string]any{"isolationLevel": isolationLevel}, 3)
+	resp, nodeIdx, err := switcher.Request(datasourceName, EP_BEGIN_TX, http.MethodPost, map[string]string{"_DsID": datasourceName}, map[string]any{"isolationLevel": isolationLevel}, 3, 3)
 	if err != nil {
 		return "", -1, err
 	}
@@ -62,7 +62,7 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 		body["timeoutSec"] = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.Request(c.datasourceName, EP_QUERY, http.MethodPost, map[string]string{"_TxID": c.txId}, body, 1)
+	resp, err := c.executor.RequestTx(c.txId, EP_QUERY, http.MethodPost, body)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"params": params,
 	}
 
-	resp, err := c.executor.Request(c.datasourceName, EP_EXECUTE, http.MethodPost, map[string]string{"_TxID": c.txId}, body, 1)
+	resp, err := c.executor.RequestTx(c.txId, EP_EXECUTE, http.MethodPost, body)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 }
 
 func (c *TxClient) Commit() error {
-	resp, err := c.executor.Request(c.datasourceName, EP_COMMIT_TX, http.MethodPut, map[string]string{"_TxID": c.txId}, nil, 1)
+	resp, err := c.executor.RequestTx(c.txId, EP_COMMIT_TX, http.MethodPut, nil)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func (c *TxClient) Commit() error {
 }
 
 func (c *TxClient) Rollback() error {
-	resp, err := c.executor.Request(c.datasourceName, EP_ROLLBACK_TX, http.MethodPut, map[string]string{"_TxID": c.txId}, nil, 1)
+	resp, err := c.executor.RequestTx(c.txId, EP_ROLLBACK_TX, http.MethodPut, nil)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (c *TxClient) Rollback() error {
 }
 
 func (c *TxClient) Close() error {
-	resp, err := c.executor.Request(c.datasourceName, EP_DONE_TX, http.MethodPut, map[string]string{"_TxID": c.txId}, nil, 1)
+	resp, err := c.executor.RequestTx(c.txId, EP_DONE_TX, http.MethodPut, nil)
 	if err != nil {
 		return err
 	}

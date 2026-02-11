@@ -11,12 +11,11 @@ import (
 )
 
 const (
-	issuedAtSecondsSize  = 4
-	sequenceNumberSize   = 4
-	datasourceIndexSize  = 1
-	clientDataHolderSize = 1
-	randomSize           = 5
-	txIDPayloadSize      = issuedAtSecondsSize + sequenceNumberSize + datasourceIndexSize + clientDataHolderSize + randomSize
+	issuedAtSecondsSize = 4
+	sequenceNumberSize  = 4
+	datasourceIndexSize = 1
+	randomSize          = 6
+	txIDPayloadSize     = issuedAtSecondsSize + sequenceNumberSize + datasourceIndexSize + randomSize
 )
 
 var (
@@ -42,7 +41,7 @@ func NewTxIDGenerator() *TxIDGenerator {
 
 // Generate creates a new transaction ID
 // Format: base64url( issuedAtSeconds|sequenceNumber|datasourceIndex|clientNodeIndex|randomBytes )
-func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (txID string, err error) {
+func (g *TxIDGenerator) Generate(datasourceIndex int) (txID string, err error) {
 	// Allocate buffer for payload
 	payload := make([]byte, txIDPayloadSize)
 	offset := 0
@@ -60,10 +59,6 @@ func (g *TxIDGenerator) Generate(datasourceIndex int, clientNodeIndex int) (txID
 	// datasourceIndex: 1 bytes
 	payload[offset] = uint8(datasourceIndex)
 	offset += datasourceIndexSize
-
-	// clientDataHolder: 1 bytes
-	payload[offset] = uint8(clientNodeIndex)
-	offset += clientDataHolderSize
 
 	// randomBytes: 5 bytes, and also used for security
 	randomBytes := make([]byte, randomSize)

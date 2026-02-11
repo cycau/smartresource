@@ -178,8 +178,8 @@ func NewTxManager(configs []global.DatasourceConfig) *TxManager {
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int, clientNodeIndex int) (*TxEntry, error) {
-	txID, err := tm.txIDGen.Generate(datasourceIdx, clientNodeIndex)
+func (tm *TxManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
+	txID, err := tm.txIDGen.Generate(datasourceIdx)
 	if err != nil {
 		return nil, err
 	}

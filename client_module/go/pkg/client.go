@@ -107,7 +107,7 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	}
 	q := map[string]string{"_DbName": c.datasourceName}
 
-	resp, err := c.executor.Request(c.datasourceName, EP_QUERY, http.MethodPost, q, body, 3)
+	resp, _, err := c.executor.Request(c.datasourceName, EP_QUERY, http.MethodPost, q, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"params": params,
 	}
 	q := map[string]string{"_DbName": c.datasourceName}
-	resp, err := c.executor.Request(c.datasourceName, EP_EXECUTE, http.MethodPost, q, body, 3)
+	resp, _, err := c.executor.Request(c.datasourceName, EP_EXECUTE, http.MethodPost, q, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}
