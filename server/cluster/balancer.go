@@ -93,7 +93,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			return
 		}
 		// Client側で、最後のリダイレクトの場合（リダイレクトを受け付けない場合）
-		if redirectCount < 2 {
+		if redirectCount < 1 {
 			if selfBestScore == nil {
 				http.Error(w, fmt.Sprintf("No resource to process on this node. Node[%s], RedirectCount[%d]", b.SelfNode.NodeID, redirectCount), http.StatusServiceUnavailable)
 				return
