@@ -10,9 +10,9 @@ import (
 // Get が未初期化でエラーになることを確認する
 func Test1() {
 
-	dsClient := smartclient.Get("crm-system")
+	dbClient := smartclient.Get("crm-system")
 
-	_, err := dsClient.Query(
+	_, err := dbClient.Query(
 		"SELECT * FROM users",
 		smartclient.Params{},
 		smartclient.QueryOptions{

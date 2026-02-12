@@ -26,15 +26,15 @@ func (s *Switcher) Init(entries []NodeEntry) error {
 	errNode := ""
 	var wg sync.WaitGroup
 	for i, entry := range entries {
+		n := &candidates[i]
+		n.BaseURL = entry.BaseURL
+		n.SecretKey = entry.SecretKey
+
 		wg.Add(1)
-
-		candidates[i].BaseURL = entry.BaseURL
-		candidates[i].SecretKey = entry.SecretKey
-		candidates[i].CheckTime = time.Now().Add(-1 * time.Hour)
-
 		go func(i int, node *nodeInfo) {
 			defer wg.Done()
-			nodeInfo, err := fetchNodeInfo(node.BaseURL, node.SecretKey, node.CheckTime)
+
+			nodeInfo, err := fetchNodeInfo(node.BaseURL, node.SecretKey)
 			if err != nil {
 				log.Printf("fetch node info %s: %v", node.BaseURL, err)
 				errNode = node.BaseURL
@@ -44,8 +44,8 @@ func (s *Switcher) Init(entries []NodeEntry) error {
 			node.Status = nodeInfo.Status
 			node.MaxHttpQueue = nodeInfo.MaxHttpQueue
 			node.Datasources = nodeInfo.Datasources
-			node.CheckTime = nodeInfo.CheckTime
-		}(i, &candidates[i])
+			node.CheckTime = time.Now()
+		}(i, n)
 	}
 	wg.Wait()
 	s.candidates = candidates
@@ -151,11 +151,9 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	// redirect control
 	if redirectCount == 1 {
 		time.Sleep(300 * time.Millisecond)
-	}
-	if redirectCount == 0 {
+	} else if redirectCount == 0 {
 		time.Sleep(500 * time.Millisecond)
-	}
-	if redirectCount < 0 {
+	} else if redirectCount < 0 {
 		return nil, nodeIdx, fmt.Errorf("Redirect count exceeded.")
 	}
 
@@ -196,7 +194,7 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 				defer tarNode.Mu.Unlock()
 				defer wg.Done()
 
-				nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey, tarNode.CheckTime)
+				nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey)
 				tarNode.CheckTime = time.Now()
 				if err != nil {
 					log.Printf("Failed to fetch node info %s: %v", tarNode.BaseURL, err)
@@ -227,7 +225,7 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 		go func(tarNode *nodeInfo) {
 			defer tarNode.Mu.Unlock()
 
-			nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey, tarNode.CheckTime)
+			nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey)
 			tarNode.CheckTime = time.Now()
 			if err != nil {
 				log.Printf("Failed to fetch node info %s: %v", tarNode.BaseURL, err)
@@ -325,13 +323,10 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint EndpointType) (nodeI
 		}
 	}
 
-	return -1, -1, nodeIndexes, fmt.Errorf("No available datasource for database %s and endpoint type %d", dbName, endpoint)
+	return -1, -1, nodeIndexes, fmt.Errorf("No available datasource for database %s and endpoint type %d.", dbName, endpoint)
 }
 
-func fetchNodeInfo(baseURL string, secretKey string, checkTime time.Time) (*nodeInfo, error) {
-	if time.Since(checkTime) < 5*time.Second {
-		return nil, nil
-	}
+func fetchNodeInfo(baseURL string, secretKey string) (*nodeInfo, error) {
 
 	req, err := http.NewRequest("GET", baseURL+"/healz", nil)
 	if err != nil {

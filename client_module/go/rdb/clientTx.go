@@ -15,7 +15,8 @@ import (
 type TxClient struct {
 	dbName   string
 	executor *Switcher
-	TxId     string
+	nodeIdx  int
+	orgTxId  string
 }
 
 func NewTx(databaseName string, isolationLevel IsolationLevel) (*TxClient, error) {
@@ -27,15 +28,35 @@ func NewTx(databaseName string, isolationLevel IsolationLevel) (*TxClient, error
 	return &TxClient{
 		dbName:   databaseName,
 		executor: switcher,
-		TxId:     txId + "." + strconv.Itoa(nodeIdx),
+		nodeIdx:  nodeIdx,
+		orgTxId:  txId,
 	}, nil
 }
 
 func GetTx(txId string) (*TxClient, error) {
+	// Check size
+	if len(txId) < 20 {
+		return nil, fmt.Errorf("invalid txId size")
+	}
+
+	idx := strings.LastIndex(txId, ".")
+	if idx == -1 {
+		return nil, fmt.Errorf("invalid txId format")
+	}
+	nodeIdx, err := strconv.ParseInt(txId[idx+1:], 10, 8)
+	if err != nil {
+		return nil, err
+	}
+
 	return &TxClient{
 		executor: switcher,
-		TxId:     txId,
+		nodeIdx:  int(nodeIdx),
+		orgTxId:  txId[:idx],
 	}, nil
+}
+
+func (c *TxClient) GetTxId() string {
+	return c.orgTxId + "." + strconv.Itoa(c.nodeIdx)
 }
 
 func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
@@ -71,13 +92,9 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 	if opts.TimeoutSec > 0 {
 		body["timeoutSec"] = opts.TimeoutSec
 	}
-	nodeIdx, txId, err := extractTxId(c.TxId)
-	if err != nil {
-		return nil, err
-	}
-	query := map[string]string{"_TxID": txId}
+	query := map[string]string{"_TxID": c.orgTxId}
 
-	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_QUERY, http.MethodPost, query, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, EP_QUERY, http.MethodPost, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -95,13 +112,9 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"sql":    sql,
 		"params": params,
 	}
-	nodeIdx, txId, err := extractTxId(c.TxId)
-	if err != nil {
-		return nil, err
-	}
-	query := map[string]string{"_TxID": txId}
+	query := map[string]string{"_TxID": c.orgTxId}
 
-	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_EXECUTE, http.MethodPost, query, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, EP_EXECUTE, http.MethodPost, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -114,13 +127,8 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 }
 
 func (c *TxClient) Commit() error {
-	nodeIdx, txId, err := extractTxId(c.TxId)
-	if err != nil {
-		return err
-	}
-	query := map[string]string{"_TxID": txId}
-
-	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_COMMIT_TX, http.MethodPut, query, nil)
+	query := map[string]string{"_TxID": c.orgTxId}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, EP_COMMIT_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -133,13 +141,8 @@ func (c *TxClient) Commit() error {
 }
 
 func (c *TxClient) Rollback() error {
-	nodeIdx, txId, err := extractTxId(c.TxId)
-	if err != nil {
-		return err
-	}
-	query := map[string]string{"_TxID": txId}
-
-	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_ROLLBACK_TX, http.MethodPut, query, nil)
+	query := map[string]string{"_TxID": c.orgTxId}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, EP_ROLLBACK_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -152,13 +155,8 @@ func (c *TxClient) Rollback() error {
 }
 
 func (c *TxClient) Close() error {
-	nodeIdx, txId, err := extractTxId(c.TxId)
-	if err != nil {
-		return err
-	}
-	query := map[string]string{"_TxID": txId}
-
-	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_DONE_TX, http.MethodPut, query, nil)
+	query := map[string]string{"_TxID": c.orgTxId}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, EP_DONE_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -168,22 +166,4 @@ func (c *TxClient) Close() error {
 		return fmt.Errorf("close tx status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 	return nil
-}
-
-func extractTxId(txId string) (int, string, error) {
-	// Check size
-	if len(txId) < 20 {
-		return -1, "", fmt.Errorf("invalid txId size")
-	}
-
-	idx := strings.LastIndex(txId, ".")
-	if idx == -1 {
-		return -1, "", fmt.Errorf("invalid txId format")
-	}
-	nodeIdx, err := strconv.ParseInt(txId[idx+1:], 10, 8)
-	if err != nil {
-		return -1, "", err
-	}
-
-	return int(nodeIdx), txId[:idx], nil
 }

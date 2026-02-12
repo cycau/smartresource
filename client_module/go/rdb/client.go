@@ -44,7 +44,7 @@ func Init(nodes []NodeEntry) error {
 	return switcher.Init(nodes)
 }
 
-func Configure(configPath string) error {
+func InitWithConfig(configPath string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)

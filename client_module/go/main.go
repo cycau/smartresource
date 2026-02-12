@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	err := smartclient.Configure("config.yaml")
+	err := smartclient.InitWithConfig("config.yaml")
 	if err != nil {
 		fmt.Println("Configure error:", err)
 		return
