@@ -6,34 +6,44 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 /**************************************************
 * TxClient
 **************************************************/
 type TxClient struct {
-	datasourceName string
-	txId           string
-	nodeIdx        int
-	executor       *Switcher
+	dbName   string
+	executor *Switcher
+	TxId     string
 }
 
-func GetTx(datasourceName string, isolationLevel IsolationLevel) (*TxClient, error) {
-	txId, nodeIdx, err := beginTx(datasourceName, isolationLevel)
+func NewTx(databaseName string, isolationLevel IsolationLevel) (*TxClient, error) {
+	txId, nodeIdx, err := beginTx(databaseName, isolationLevel)
 	if err != nil {
 		return nil, err
 	}
 
 	return &TxClient{
-		datasourceName: datasourceName,
-		txId:           txId + "." + strconv.Itoa(nodeIdx),
-		executor:       switcher,
+		dbName:   databaseName,
+		executor: switcher,
+		TxId:     txId + "." + strconv.Itoa(nodeIdx),
 	}, nil
 }
 
-func beginTx(datasourceName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
+func GetTx(txId string) (*TxClient, error) {
+	return &TxClient{
+		executor: switcher,
+		TxId:     txId,
+	}, nil
+}
 
-	resp, nodeIdx, err := switcher.Request(datasourceName, EP_BEGIN_TX, http.MethodPost, map[string]string{"_DsID": datasourceName}, map[string]any{"isolationLevel": isolationLevel}, 3, 3)
+func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
+
+	body := map[string]any{"isolationLevel": isolationLevel}
+	query := map[string]string{"_DbName": databaseName}
+
+	resp, nodeIdx, err := switcher.Request(databaseName, EP_BEGIN_TX, http.MethodPost, query, body, 3, 3)
 	if err != nil {
 		return "", -1, err
 	}
@@ -61,8 +71,13 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 	if opts.TimeoutSec > 0 {
 		body["timeoutSec"] = opts.TimeoutSec
 	}
+	nodeIdx, txId, err := extractTxId(c.TxId)
+	if err != nil {
+		return nil, err
+	}
+	query := map[string]string{"_TxID": txId}
 
-	resp, err := c.executor.RequestTx(c.txId, EP_QUERY, http.MethodPost, body)
+	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_QUERY, http.MethodPost, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +95,13 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"sql":    sql,
 		"params": params,
 	}
+	nodeIdx, txId, err := extractTxId(c.TxId)
+	if err != nil {
+		return nil, err
+	}
+	query := map[string]string{"_TxID": txId}
 
-	resp, err := c.executor.RequestTx(c.txId, EP_EXECUTE, http.MethodPost, body)
+	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_EXECUTE, http.MethodPost, query, body)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +114,13 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 }
 
 func (c *TxClient) Commit() error {
-	resp, err := c.executor.RequestTx(c.txId, EP_COMMIT_TX, http.MethodPut, nil)
+	nodeIdx, txId, err := extractTxId(c.TxId)
+	if err != nil {
+		return err
+	}
+	query := map[string]string{"_TxID": txId}
+
+	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_COMMIT_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -107,7 +133,13 @@ func (c *TxClient) Commit() error {
 }
 
 func (c *TxClient) Rollback() error {
-	resp, err := c.executor.RequestTx(c.txId, EP_ROLLBACK_TX, http.MethodPut, nil)
+	nodeIdx, txId, err := extractTxId(c.TxId)
+	if err != nil {
+		return err
+	}
+	query := map[string]string{"_TxID": txId}
+
+	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_ROLLBACK_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -120,7 +152,13 @@ func (c *TxClient) Rollback() error {
 }
 
 func (c *TxClient) Close() error {
-	resp, err := c.executor.RequestTx(c.txId, EP_DONE_TX, http.MethodPut, nil)
+	nodeIdx, txId, err := extractTxId(c.TxId)
+	if err != nil {
+		return err
+	}
+	query := map[string]string{"_TxID": txId}
+
+	resp, err := c.executor.RequestTargetNode(nodeIdx, EP_DONE_TX, http.MethodPut, query, nil)
 	if err != nil {
 		return err
 	}
@@ -130,4 +168,22 @@ func (c *TxClient) Close() error {
 		return fmt.Errorf("close tx status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 	return nil
+}
+
+func extractTxId(txId string) (int, string, error) {
+	// Check size
+	if len(txId) < 20 {
+		return -1, "", fmt.Errorf("invalid txId size")
+	}
+
+	idx := strings.LastIndex(txId, ".")
+	if idx == -1 {
+		return -1, "", fmt.Errorf("invalid txId format")
+	}
+	nodeIdx, err := strconv.ParseInt(txId[idx+1:], 10, 8)
+	if err != nil {
+		return -1, "", err
+	}
+
+	return int(nodeIdx), txId[:idx], nil
 }

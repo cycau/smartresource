@@ -67,15 +67,15 @@ func Configure(configPath string) error {
 * DsClient
 **************************************************/
 type Client struct {
-	datasourceName string
-	executor       *Switcher
+	dbName   string
+	executor *Switcher
 }
 
 // Get は databaseName 用のクライアントを返す。空の場合は defaultDatabase を使用する
-func Get(datasourceName string) *Client {
+func Get(databaseName string) *Client {
 	return &Client{
-		datasourceName: datasourceName,
-		executor:       switcher,
+		dbName:   databaseName,
+		executor: switcher,
 	}
 }
 
@@ -93,6 +93,8 @@ func ParamVal(val any, valType ValueType) ParamValue {
 	}
 }
 
+type Params []ParamValue
+
 func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
 
 	body := map[string]any{
@@ -105,9 +107,9 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	if opts.TimeoutSec > 0 {
 		body["timeoutSec"] = opts.TimeoutSec
 	}
-	q := map[string]string{"_DbName": c.datasourceName}
+	query := map[string]string{"_DbName": c.dbName}
 
-	resp, _, err := c.executor.Request(c.datasourceName, EP_QUERY, http.MethodPost, q, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, EP_QUERY, http.MethodPost, query, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +128,9 @@ func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"sql":    sql,
 		"params": params,
 	}
-	q := map[string]string{"_DbName": c.datasourceName}
-	resp, _, err := c.executor.Request(c.datasourceName, EP_EXECUTE, http.MethodPost, q, body, 3, 3)
+	query := map[string]string{"_DbName": c.dbName}
+
+	resp, _, err := c.executor.Request(c.dbName, EP_EXECUTE, http.MethodPost, query, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}

@@ -3,7 +3,7 @@ package test
 import (
 	"fmt"
 
-	smartclient "smartresource/clientmodule/go/pkg"
+	smartclient "smartresource/clientmodule/go/rdb"
 )
 
 // サンプル用の一時 config を作成し、Init が config を読むことと

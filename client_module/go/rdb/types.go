@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// ValType はパラメータの型（JSON の "type" に使用）
 type ValueType string
 
 const (
@@ -23,11 +22,9 @@ const (
 
 // ParamValue はクエリ/実行のパラメータ
 type ParamValue struct {
-	Type  ValueType `json:"type"`
 	Value any       `json:"value,omitempty"`
+	Type  ValueType `json:"type"`
 }
-
-type Params []ParamValue
 
 // QueryOptions は Query のオプション
 type QueryOptions struct {
@@ -84,18 +81,18 @@ type NodeEntry struct {
 }
 
 // nodeHealth は /healz レスポンス（サーバーと互換）
-type NodeInfo struct {
+type nodeInfo struct {
 	BaseURL      string           `yaml:"baseUrl"`
 	SecretKey    string           `yaml:"secretKey"`
 	NodeID       string           `json:"nodeId"`
 	Status       string           `json:"status"`
 	MaxHttpQueue int              `json:"maxHttpQueue"`
 	CheckTime    time.Time        `json:"checkTime"`
-	Datasources  []DatasourceInfo `json:"datasources"`
+	Datasources  []datasourceInfo `json:"datasources"`
 	Mu           sync.RWMutex     `json:"-"`
 }
 
-type DatasourceInfo struct {
+type datasourceInfo struct {
 	DatasourceID string `json:"datasourceId"`
 	DatabaseName string `json:"databaseName"`
 	Active       bool   `json:"active"`

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	smartclient "smartresource/clientmodule/go/pkg"
+	smartclient "smartresource/clientmodule/go/rdb"
 	"smartresource/clientmodule/go/test"
 	"sync"
 	"time"

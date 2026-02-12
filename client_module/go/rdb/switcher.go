@@ -9,20 +9,19 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
 
 type Switcher struct {
-	candidates []NodeInfo
+	candidates []nodeInfo
 	db         string
 }
 
 var switcher = &Switcher{}
 
 func (s *Switcher) Init(entries []NodeEntry) error {
-	candidates := make([]NodeInfo, len(entries))
+	candidates := make([]nodeInfo, len(entries))
 
 	errNode := ""
 	var wg sync.WaitGroup
@@ -33,7 +32,7 @@ func (s *Switcher) Init(entries []NodeEntry) error {
 		candidates[i].SecretKey = entry.SecretKey
 		candidates[i].CheckTime = time.Now().Add(-1 * time.Hour)
 
-		go func(i int, node *NodeInfo) {
+		go func(i int, node *nodeInfo) {
 			defer wg.Done()
 			nodeInfo, err := fetchNodeInfo(node.BaseURL, node.SecretKey, node.CheckTime)
 			if err != nil {
@@ -74,8 +73,7 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 		return resp, nodeIdx, nil
 	}
 
-	// network error or connection timeout or capacity error
-	// try to reflect healz and select another node
+	// retry only when network error or connection timeout or capacity error
 	if resp.StatusCode != http.StatusBadGateway &&
 		resp.StatusCode != http.StatusGatewayTimeout &&
 		resp.StatusCode != http.StatusServiceUnavailable {
@@ -96,22 +94,19 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 	node.CheckTime = time.Now()
 	node.Mu.Unlock()
 
+	retryCount--
 	if retryCount < 0 {
 		return nil, nodeIdx, fmt.Errorf("Failed to connect to service. Retry count exceeded.")
 	}
 
 	// retry
-	return s.Request(dbName, endpoint, method, query, body, redirectCount, retryCount-1)
+	return s.Request(dbName, endpoint, method, query, body, redirectCount, retryCount)
 }
 
-func (s *Switcher) RequestTx(txId string, endpoint EndpointType, method string, body any) (*http.Response, error) {
-	nodeIdx, err := extractNodeIdx(txId)
-	if err != nil {
-		return nil, err
-	}
+func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint EndpointType, method string, query map[string]string, body map[string]any) (*http.Response, error) {
 	node := &s.candidates[nodeIdx]
-	query := map[string]string{"_TxID": txId}
-	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, 1)
+
+	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, 0)
 	return resp, err
 }
 
@@ -152,6 +147,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		return resp, nodeIdx, fmt.Errorf("query status %d", resp.StatusCode)
 	}
 
+	redirectCount--
 	// redirect control
 	if redirectCount == 1 {
 		time.Sleep(300 * time.Millisecond)
@@ -172,7 +168,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		redirectNode := &s.candidates[i]
 		if redirectNode.NodeID == redirectNodeId {
 			log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
-			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, query, body, redirectCount-1)
+			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, query, body, redirectCount)
 		}
 	}
 
@@ -196,7 +192,7 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 			}
 
 			wg.Add(1)
-			go func(tarNode *NodeInfo) {
+			go func(tarNode *nodeInfo) {
 				defer tarNode.Mu.Unlock()
 				defer wg.Done()
 
@@ -228,7 +224,7 @@ func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int
 			continue
 		}
 
-		go func(tarNode *NodeInfo) {
+		go func(tarNode *nodeInfo) {
 			defer tarNode.Mu.Unlock()
 
 			nodeInfo, err := fetchNodeInfo(tarNode.BaseURL, tarNode.SecretKey, tarNode.CheckTime)
@@ -332,7 +328,7 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint EndpointType) (nodeI
 	return -1, -1, nodeIndexes, fmt.Errorf("No available datasource for database %s and endpoint type %d", dbName, endpoint)
 }
 
-func fetchNodeInfo(baseURL string, secretKey string, checkTime time.Time) (*NodeInfo, error) {
+func fetchNodeInfo(baseURL string, secretKey string, checkTime time.Time) (*nodeInfo, error) {
 	if time.Since(checkTime) < 5*time.Second {
 		return nil, nil
 	}
@@ -352,29 +348,11 @@ func fetchNodeInfo(baseURL string, secretKey string, checkTime time.Time) (*Node
 	if err != nil {
 		return nil, err
 	}
-	var nodeInfo NodeInfo
+	var nodeInfo nodeInfo
 	err = json.Unmarshal(body, &nodeInfo)
 	if err != nil {
 		return nil, err
 	}
 
 	return &nodeInfo, nil
-}
-
-func extractNodeIdx(txId string) (int, error) {
-	// Check size
-	if len(txId) < 20 {
-		return -1, fmt.Errorf("invalid txId size")
-	}
-
-	idx := strings.LastIndex(txId, ".")
-	if idx == -1 {
-		return -1, fmt.Errorf("invalid txId format")
-	}
-	nodeIdx, err := strconv.ParseInt(txId[idx+1:], 10, 8)
-	if err != nil {
-		return -1, err
-	}
-
-	return int(nodeIdx), nil
 }
