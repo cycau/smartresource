@@ -2,26 +2,53 @@ package smartclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 type Switcher struct {
 	candidates []nodeInfo
-	db         string
+	httpClient *http.Client
+	sem        *semaphore.Weighted
 }
 
 var switcher = &Switcher{}
 
-func (s *Switcher) Init(entries []NodeEntry) error {
-	candidates := make([]nodeInfo, len(entries))
+// Shared HTTP client with connection pooling and Keep-Alive
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        200,   // 最大アイドル接続数
+		MaxIdleConnsPerHost: 200,   // ホストごとの最大アイドル接続数
+		MaxConnsPerHost:     0,     // 無制限（デフォルト）
+		DisableKeepAlives:   false, // Keep-Aliveを有効化
+
+		DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
+	},
+}
+
+func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabase string, err error) {
+	count := len(entries)
+	if count == 0 {
+		return "", fmt.Errorf("No cluster nodes configured.")
+	}
+
+	candidates := make([]nodeInfo, count)
 
 	errNode := ""
 	var wg sync.WaitGroup
@@ -48,12 +75,28 @@ func (s *Switcher) Init(entries []NodeEntry) error {
 		}(i, n)
 	}
 	wg.Wait()
-	s.candidates = candidates
 
 	if errNode != "" {
-		return fmt.Errorf("failed to connect to node. %s", errNode)
+		return "", fmt.Errorf("failed to connect to node. %s", errNode)
 	}
-	return nil
+
+	s.candidates = candidates
+	s.httpClient = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:      int(float64(maxConcurrency) * 1.1), // 最大アイドル接続数
+			DisableKeepAlives: false,                              // Keep-Aliveを有効化
+
+			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
+		},
+	}
+	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
+
+	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
 func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, query map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
@@ -67,7 +110,6 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 	if resp == nil {
 		return nil, nodeIdx, err
 	}
-	defer resp.Body.Close()
 	// OK response
 	if err == nil {
 		return resp, nodeIdx, nil
@@ -79,8 +121,10 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 		resp.StatusCode != http.StatusServiceUnavailable {
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, nodeIdx, fmt.Errorf("Request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
+	resp.Body.Close()
 
 	node.Mu.Lock()
 	switch resp.StatusCode {
@@ -96,7 +140,7 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 
 	retryCount--
 	if retryCount < 0 {
-		return nil, nodeIdx, fmt.Errorf("Failed to connect to service. Retry count exceeded.")
+		return nil, nodeIdx, fmt.Errorf("Failed to connect to service. Retry count exceeded. Last status: %d error: %v", resp.StatusCode, err)
 	}
 
 	// retry
@@ -111,6 +155,11 @@ func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint EndpointType, method 
 }
 
 func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint EndpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, int, error) {
+	// redirect多発する場合は並列数調整役割も兼ねる
+	if err := s.sem.Acquire(context.Background(), 1); err != nil {
+		return nil, nodeIdx, err
+	}
+	defer s.sem.Release(1)
 
 	u := baseURL + "/rdb" + GetEndpointPath(endpoint)
 	req, err := http.NewRequest(method, u, nil)
@@ -134,8 +183,9 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		req.Body = io.NopCloser(&buf)
 		req.ContentLength = int64(buf.Len())
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		log.Printf("Request failed with Error: %v", err)
 		return nil, nodeIdx, err
 	}
 
@@ -143,8 +193,9 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		return resp, nodeIdx, nil
 	}
 
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusTemporaryRedirect {
-		return resp, nodeIdx, fmt.Errorf("query status %d", resp.StatusCode)
+		return nil, nodeIdx, fmt.Errorf("query status %d", resp.StatusCode)
 	}
 
 	redirectCount--
@@ -165,7 +216,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	for i := range s.candidates {
 		redirectNode := &s.candidates[i]
 		if redirectNode.NodeID == redirectNodeId {
-			log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
+			//log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
 			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, query, body, redirectCount)
 		}
 	}
@@ -333,7 +384,7 @@ func fetchNodeInfo(baseURL string, secretKey string) (*nodeInfo, error) {
 		return nil, err
 	}
 	req.Header.Set("X-Secret-Key", secretKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 
 	if err != nil {
 		return nil, err

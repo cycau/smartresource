@@ -72,7 +72,9 @@ const (
 // clientConfig は config.yaml の構造
 type clientConfig struct {
 	DefaultSecretKey string      `yaml:"defaultSecretKey"`
+	DefaultDatabase  string      `yaml:"defaultDatabase"`
 	ClusterNodes     []NodeEntry `yaml:"clusterNodes"`
+	MaxConcurrency   int         `yaml:"maxConcurrency"`
 }
 
 type NodeEntry struct {

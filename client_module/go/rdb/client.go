@@ -40,8 +40,12 @@ func GetEndpointPath(ep EndpointType) string {
 	}
 }
 
-func Init(nodes []NodeEntry) error {
-	return switcher.Init(nodes)
+var DEFAULT_DATABASE = ""
+
+func Init(nodes []NodeEntry, maxConcurrency int) error {
+	defaultDatabase, err := switcher.Init(nodes, maxConcurrency)
+	DEFAULT_DATABASE = defaultDatabase
+	return err
 }
 
 func InitWithConfig(configPath string) error {
@@ -60,12 +64,19 @@ func InitWithConfig(configPath string) error {
 		}
 	}
 
-	return switcher.Init(config.ClusterNodes)
+	defaultDatabase, err := switcher.Init(config.ClusterNodes, config.MaxConcurrency)
+	if config.DefaultDatabase != "" {
+		DEFAULT_DATABASE = config.DefaultDatabase
+	} else {
+		DEFAULT_DATABASE = defaultDatabase
+	}
+	return err
 }
 
 /**************************************************
 * DsClient
 **************************************************/
+
 type Client struct {
 	dbName   string
 	executor *Switcher
@@ -73,6 +84,9 @@ type Client struct {
 
 // Get は databaseName 用のクライアントを返す。空の場合は defaultDatabase を使用する
 func Get(databaseName string) *Client {
+	if databaseName == "" {
+		databaseName = DEFAULT_DATABASE
+	}
 	return &Client{
 		dbName:   databaseName,
 		executor: switcher,

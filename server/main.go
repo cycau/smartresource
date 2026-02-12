@@ -66,8 +66,12 @@ func runServer(config global.Config) {
 
 	// Create HTTP server
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", config.NodePort),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", config.NodePort),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       15 * time.Second,
 	}
 
 	// Start server in a goroutine

@@ -1,6 +1,6 @@
 defaultSecretKey: "secret-key"
-# 省略時は Get("dbname") で指定。Get() 無引数で使う場合は設定する
-# defaultDatabase: "crm-system"
+defaultDatabase: "crm-system"
+maxConcurrency: 100
 
 clusterNodes:
   - baseUrl: "http://localhost:5678"

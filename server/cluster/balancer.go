@@ -148,6 +148,7 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 		scores = append(scores, score)
 	}
 
+	log.Printf("#Self Node Scores: %+v", scores)
 	// ノード選択（TopK + Weighted Random）
 	best, bestRandom := selectBestRandomScore(scores)
 	if best == nil {
@@ -178,7 +179,7 @@ func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT
 	scores := make([]*ScoreWithWeight, 0, 255)
 
 	for nodeIdx, node := range otherNodes {
-		node.Mu.RLock()
+		node.Mu.Lock()
 
 		for dsIdx := range node.Datasources {
 			score := node.GetScore(dsIdx, tarDbName, endpoint)
@@ -190,7 +191,7 @@ func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT
 			scores = append(scores, score)
 		}
 
-		node.Mu.RUnlock()
+		node.Mu.Unlock()
 	}
 
 	// ノード選択

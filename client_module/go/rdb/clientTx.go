@@ -20,6 +20,9 @@ type TxClient struct {
 }
 
 func NewTx(databaseName string, isolationLevel IsolationLevel) (*TxClient, error) {
+	if databaseName == "" {
+		databaseName = DEFAULT_DATABASE
+	}
 	txId, nodeIdx, err := beginTx(databaseName, isolationLevel)
 	if err != nil {
 		return nil, err

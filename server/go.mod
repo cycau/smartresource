@@ -5,7 +5,6 @@ go 1.24.0
 require (
 	github.com/go-chi/chi/v5 v5.0.12
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/paulbellamy/ratecounter v0.2.0
