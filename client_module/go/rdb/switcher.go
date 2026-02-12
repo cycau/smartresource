@@ -24,23 +24,7 @@ type Switcher struct {
 }
 
 var switcher = &Switcher{}
-
-// Shared HTTP client with connection pooling and Keep-Alive
-var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        200,   // 最大アイドル接続数
-		MaxIdleConnsPerHost: 200,   // ホストごとの最大アイドル接続数
-		MaxConnsPerHost:     0,     // 無制限（デフォルト）
-		DisableKeepAlives:   false, // Keep-Aliveを有効化
-
-		DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
-	},
-}
+var httpClient *http.Client
 
 func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabase string, err error) {
 	count := len(entries)
@@ -81,11 +65,13 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 	}
 
 	s.candidates = candidates
-	s.httpClient = &http.Client{
+	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
+
+	httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			MaxIdleConns:      int(float64(maxConcurrency) * 1.1), // 最大アイドル接続数
-			DisableKeepAlives: false,                              // Keep-Aliveを有効化
+			MaxIdleConns:      maxConcurrency * 2, // 最大アイドル接続数 TODO: configurable?
+			DisableKeepAlives: false,              // Keep-Aliveを有効化
 
 			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
 				Timeout:   5 * time.Second,
@@ -94,7 +80,6 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 			IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
 		},
 	}
-	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
 
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
