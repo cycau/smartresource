@@ -8,10 +8,6 @@ import (
 
 	"smartdatastream/server/global"
 	. "smartdatastream/server/global"
-
-	"github.com/paulbellamy/ratecounter"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 )
 
 type NodeStatus string
@@ -47,19 +43,12 @@ type DatasourceInfo struct {
 	MaxWriteConns int    `json:"maxWriteConns"`
 	MinWriteConns int    `json:"minWriteConns"`
 
-	RunningRead  int `json:"runningRead"`
-	RunningWrite int `json:"runningWrite"`
-	RunningTx    int `json:"runningTx"`
-
+	RunningRead   int     `json:"runningRead"`
+	RunningWrite  int     `json:"runningWrite"`
+	RunningTx     int     `json:"runningTx"`
 	LatencyP95Ms  int     `json:"latencyP95Ms"`
 	ErrorRate1m   float64 `json:"errorRate1m"`
 	TimeoutRate1m float64 `json:"timeoutRate1m"`
-
-	StatLatency   *prometheus.SummaryVec   `json:"-"`
-	StatTotal     *ratecounter.RateCounter `json:"-"`
-	StatErrors    *ratecounter.RateCounter `json:"-"`
-	StatTimeouts  *ratecounter.RateCounter `json:"-"`
-	collectedTime time.Time                `json:"-"`
 }
 
 /*****************************
@@ -68,10 +57,6 @@ type DatasourceInfo struct {
 const STAT_WINDOW_INTERVAL = 5 * time.Minute
 
 func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
-	var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Objectives: map[float64]float64{0.95: 0.01},
-		MaxAge:     STAT_WINDOW_INTERVAL,
-	}, []string{"latency"})
 
 	return &DatasourceInfo{
 		DatasourceID:  config.DatasourceID,
@@ -82,11 +67,12 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 		MaxWriteConns: config.MaxWriteConns,
 		MinWriteConns: config.MinWriteConns,
 
-		StatLatency:   statLatency,
-		StatTotal:     ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
-		StatErrors:    ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
-		StatTimeouts:  ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
-		collectedTime: time.Now().Add(-STAT_WINDOW_INTERVAL),
+		RunningRead:   0,
+		RunningWrite:  0,
+		RunningTx:     0,
+		LatencyP95Ms:  0,
+		ErrorRate1m:   0,
+		TimeoutRate1m: 0,
 	}
 }
 
@@ -98,7 +84,6 @@ func (node *NodeInfo) Clone() NodeInfo {
 	datasources := make([]DatasourceInfo, len(node.Datasources))
 	for idx := range node.Datasources {
 		dsInfo := &node.Datasources[idx]
-		collectStats(dsInfo)
 		datasources[idx] = *dsInfo
 	}
 
@@ -115,37 +100,43 @@ func (node *NodeInfo) Clone() NodeInfo {
 	}
 }
 
+// 定数定義
+type ENDPOINT_TYPE int
+
+const (
+	EP_Query ENDPOINT_TYPE = iota
+	EP_Execute
+	EP_BeginTx
+	EP_Other
+)
+
+// エンドポイントタイプ取得
+func GetEndpointType(path string) ENDPOINT_TYPE {
+
+	if strings.HasSuffix(path, EP_PATH_QUERY) {
+		return EP_Query
+	}
+	if strings.HasSuffix(path, EP_PATH_EXECUTE) {
+		return EP_Execute
+	}
+	if strings.HasSuffix(path, EP_PATH_BEGIN_TX) {
+		return EP_BeginTx
+	}
+
+	return EP_Other
+}
+
 /*****************************
  * スコア計算
  *****************************/
-func (node *NodeInfo) StatsRequest(datasourceIdx int, runningRead int, runningWrite int, runningTx int) {
-	node.Mu.Lock()
-	dsInfo := &node.Datasources[datasourceIdx]
+const (
+	LAT_BAD_MS       = 3000.0 // 3秒を"かなり悪い"基準
+	ERR_RATE_BAD     = 0.05   // 1分5%をかなり悪い
+	TIMEOUT_RATE_BAD = 0.05   // 1分5%をかなり悪い
 
-	dsInfo.RunningRead = runningRead
-	dsInfo.RunningWrite = runningWrite
-	dsInfo.RunningTx = runningTx
-
-	node.Mu.Unlock()
-}
-func (node *NodeInfo) StatsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
-	node.Mu.Lock()
-	dsInfo := &node.Datasources[datasourceIdx]
-
-	dsInfo.StatTotal.Incr(1)
-
-	if isError {
-		dsInfo.StatErrors.Incr(1)
-		return
-	}
-	if isTimeout {
-		dsInfo.StatTimeouts.Incr(1)
-		return
-	}
-	dsInfo.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
-
-	node.Mu.Unlock()
-}
+	UPTIME_OK = 300.0 // サーバー起動から5分以上でOK
+	TOP_K     = 3     // スコア上位TopK
+)
 
 func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
 
@@ -168,7 +159,6 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 		return nil
 	}
 
-	collectStats(dsInfo)
 	m := calculateMetrics(node, dsInfo)
 	score := calculateScore(endpoint, m)
 
@@ -186,25 +176,6 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 
 	return &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx}
 }
-
-// 定数定義
-type ENDPOINT_TYPE int
-
-const (
-	EP_Query ENDPOINT_TYPE = iota
-	EP_Execute
-	EP_BeginTx
-	EP_Other
-)
-
-const (
-	LAT_BAD_MS       = 3000.0 // 3秒を"かなり悪い"基準
-	ERR_RATE_BAD     = 0.05   // 1分5%をかなり悪い
-	TIMEOUT_RATE_BAD = 0.05   // 1分5%をかなり悪い
-
-	UPTIME_OK = 300.0 // サーバー起動から5分以上でOK
-	TOP_K     = 3     // スコア上位TopK
-)
 
 // 正規化された指標を計算
 type normalizedMetrics struct {
@@ -228,61 +199,12 @@ type ScoreWithWeight struct {
 	exIndex int
 }
 
-// エンドポイントタイプ取得
-func GetEndpointType(path string) ENDPOINT_TYPE {
-
-	if strings.HasSuffix(path, EP_PATH_QUERY) {
-		return EP_Query
-	}
-	if strings.HasSuffix(path, EP_PATH_EXECUTE) {
-		return EP_Execute
-	}
-	if strings.HasSuffix(path, EP_PATH_BEGIN_TX) {
-		return EP_BeginTx
-	}
-
-	return EP_Other
-}
-
 // clamp01 0〜1にクランプ
 func clamp01(x float64) float64 {
 	return math.Min(1.0, math.Max(0.0, x))
 }
 
 const STAT_COLLECT_INTERVAL = 500 * time.Millisecond
-
-func collectStats(dsInfo *DatasourceInfo) {
-
-	// 品質指標の正規化
-	if dsInfo.StatLatency == nil {
-		return
-	}
-
-	if time.Since(dsInfo.collectedTime) < STAT_COLLECT_INTERVAL {
-		return
-	}
-
-	// collecte when self node
-	latency := &dto.Metric{}
-	dsInfo.StatLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency)
-	p95 := latency.GetSummary().GetQuantile()[0].GetValue()
-	if math.IsNaN(p95) {
-		p95 = 16.0
-	}
-
-	total := float64(dsInfo.StatTotal.Rate())
-	errorRate1m := 0.0
-	timeoutRate1m := 0.0
-	if total > 0 {
-		errorRate1m = float64(dsInfo.StatErrors.Rate()) / total
-		timeoutRate1m = float64(dsInfo.StatTimeouts.Rate()) / total
-	}
-
-	dsInfo.LatencyP95Ms = int(p95)
-	dsInfo.ErrorRate1m = errorRate1m
-	dsInfo.TimeoutRate1m = timeoutRate1m
-	dsInfo.collectedTime = time.Now()
-}
 
 func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
 	httpFree := 1 - clamp01(float64(node.RunningHttp)/float64(node.MaxHttpQueue))
