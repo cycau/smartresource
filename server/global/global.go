@@ -20,9 +20,10 @@ type DatasourceConfig struct {
 	Driver                 string `yaml:"driver"`
 	DSN                    string `yaml:"dsn"`
 	MaxOpenConns           int    `yaml:"maxOpenConns"`
+	MaxWriteConns          int    `yaml:"maxWriteConns"`
+	MinWriteConns          int    `yaml:"minWriteConns"`
 	MaxIdleConns           int    `yaml:"maxIdleConns"`
 	MaxConnLifetimeSec     int    `yaml:"maxConnLifetimeSec"`
-	MaxTxConns             int    `yaml:"maxTxConns"`
 	MaxTxIdleTimeoutSec    int    `yaml:"maxTxIdleTimeoutSec"`
 	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
 	Readonly               bool   `yaml:"readonly"`

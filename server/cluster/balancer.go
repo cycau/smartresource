@@ -155,21 +155,9 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 		return nil, nil
 	}
 
-	// 使用率80%以上なら、他のノードとの協調を試みる
-	if float64(selfNode.RunningHttp)/float64(selfNode.MaxHttpQueue) >= USAGE_THRESHOLD {
+	// 使用率80%相当
+	if best.score < 0.45 {
 		return best, nil
-	}
-
-	randomDs := selfNode.Datasources[bestRandom.exIndex]
-	switch endpoint {
-	case EP_BeginTx:
-		if float64(randomDs.RunningTx)/float64(randomDs.MaxTxConns) >= USAGE_THRESHOLD {
-			return best, nil
-		}
-	default:
-		if float64(randomDs.RunningQuery)/float64((randomDs.MaxOpenConns)) >= USAGE_THRESHOLD {
-			return best, nil
-		}
 	}
 
 	return best, bestRandom

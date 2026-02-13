@@ -39,17 +39,16 @@ type NodeInfo struct {
 }
 
 type DatasourceInfo struct {
-	DatasourceID string `json:"datasourceId"`
-	DatabaseName string `json:"databaseName"`
-	Active       bool   `json:"active"`
-	Readonly     bool   `json:"readonly"`
-	MaxOpenConns int    `json:"maxOpenConns"`
-	MaxIdleConns int    `json:"maxIdleConns"`
-	MaxTxConns   int    `json:"maxTxConns"`
+	DatasourceID  string `json:"datasourceId"`
+	DatabaseName  string `json:"databaseName"`
+	Active        bool   `json:"active"`
+	Readonly      bool   `json:"readonly"`
+	MaxOpenConns  int    `json:"maxOpenConns"`
+	MaxWriteConns int    `json:"maxWriteConns"`
+	MinWriteConns int    `json:"minWriteConns"`
 
-	OpenConns    int `json:"openConns"`
-	IdleConns    int `json:"idleConns"`
-	RunningQuery int `json:"runningQuery"`
+	RunningRead  int `json:"runningRead"`
+	RunningWrite int `json:"runningWrite"`
 	RunningTx    int `json:"runningTx"`
 
 	LatencyP95Ms  int     `json:"latencyP95Ms"`
@@ -75,13 +74,13 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 	}, []string{"latency"})
 
 	return &DatasourceInfo{
-		DatasourceID: config.DatasourceID,
-		DatabaseName: config.DatabaseName,
-		Active:       true,
-		Readonly:     config.Readonly,
-		MaxOpenConns: config.MaxOpenConns,
-		MaxIdleConns: config.MaxIdleConns,
-		MaxTxConns:   config.MaxTxConns,
+		DatasourceID:  config.DatasourceID,
+		DatabaseName:  config.DatabaseName,
+		Active:        true,
+		Readonly:      config.Readonly,
+		MaxOpenConns:  config.MaxOpenConns,
+		MaxWriteConns: config.MaxWriteConns,
+		MinWriteConns: config.MinWriteConns,
 
 		StatLatency:   statLatency,
 		StatTotal:     ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
@@ -119,18 +118,33 @@ func (node *NodeInfo) Clone() NodeInfo {
 /*****************************
  * スコア計算
  *****************************/
-func (d *DatasourceInfo) StatsResult(latencyMs int64, isError bool, isTimeout bool) {
-	d.StatTotal.Incr(1)
+func (node *NodeInfo) StatsRequest(datasourceIdx int, runningRead int, runningWrite int, runningTx int) {
+	node.Mu.Lock()
+	dsInfo := &node.Datasources[datasourceIdx]
+
+	dsInfo.RunningRead = runningRead
+	dsInfo.RunningWrite = runningWrite
+	dsInfo.RunningTx = runningTx
+
+	node.Mu.Unlock()
+}
+func (node *NodeInfo) StatsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
+	node.Mu.Lock()
+	dsInfo := &node.Datasources[datasourceIdx]
+
+	dsInfo.StatTotal.Incr(1)
 
 	if isError {
-		d.StatErrors.Incr(1)
+		dsInfo.StatErrors.Incr(1)
 		return
 	}
 	if isTimeout {
-		d.StatTimeouts.Incr(1)
+		dsInfo.StatTimeouts.Incr(1)
 		return
 	}
-	d.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
+	dsInfo.StatLatency.WithLabelValues("p95").Observe(float64(latencyMs))
+
+	node.Mu.Unlock()
 }
 
 func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
@@ -161,11 +175,11 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 	weight := 0.0
 	switch endpoint {
 	case EP_Query:
-		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns)
+		weight = float64(dsInfo.MaxOpenConns - dsInfo.MinWriteConns)
 	case EP_Execute:
-		weight = float64(dsInfo.MaxOpenConns - dsInfo.MaxTxConns/2)
+		weight = float64(dsInfo.MaxWriteConns)
 	case EP_BeginTx:
-		weight = float64(dsInfo.MaxTxConns)
+		weight = float64(dsInfo.MaxWriteConns+dsInfo.MinWriteConns) / 2.0
 	default:
 		weight = float64(dsInfo.MaxOpenConns)
 	}
@@ -187,22 +201,24 @@ const (
 	LAT_BAD_MS       = 3000.0 // 3秒を"かなり悪い"基準
 	ERR_RATE_BAD     = 0.05   // 1分5%をかなり悪い
 	TIMEOUT_RATE_BAD = 0.05   // 1分5%をかなり悪い
-	UPTIME_OK        = 300.0  // サーバー起動から5分以上でOK
-	TOP_K            = 3      // スコア上位TopK
-	USAGE_THRESHOLD  = 0.8    // 使用率80%以下なら自分で処理、それ以外は他ノードとの協調で処理
+
+	UPTIME_OK = 300.0 // サーバー起動から5分以上でOK
+	TOP_K     = 3     // スコア上位TopK
 )
 
 // 正規化された指標を計算
 type normalizedMetrics struct {
-	httpFree    float64
-	dbFree      float64
-	txFree      float64
-	idleScore   float64
-	uptimeScore float64
+	httpFree float64
+
+	readFree  float64
+	writeFree float64
+	txFree    float64
 
 	latScore  float64
 	errScore  float64
 	toutScore float64
+
+	uptimeScore float64
 }
 
 // Node score information
@@ -233,7 +249,7 @@ func clamp01(x float64) float64 {
 	return math.Min(1.0, math.Max(0.0, x))
 }
 
-const STAT_COLLECT_INTERVAL = 1500 * time.Millisecond
+const STAT_COLLECT_INTERVAL = 500 * time.Millisecond
 
 func collectStats(dsInfo *DatasourceInfo) {
 
@@ -269,81 +285,84 @@ func collectStats(dsInfo *DatasourceInfo) {
 }
 
 func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
+	httpFree := 1 - clamp01(float64(node.RunningHttp)/float64(node.MaxHttpQueue))
 
-	httpUsage := float64(node.RunningHttp) / float64(node.MaxHttpQueue)
-	dbUsage := float64(dsInfo.RunningQuery) / float64(dsInfo.MaxOpenConns)
-	txUsage := 1.0
-	if dsInfo.MaxTxConns > 0 {
-		txUsage = float64(dsInfo.RunningTx) / float64(dsInfo.MaxTxConns)
-	}
+	capacityMultiple := float64(node.MaxHttpQueue) / float64(dsInfo.MaxOpenConns)
 
-	httpFree := 1 - clamp01(httpUsage)
-	dbFree := 1 - clamp01(dbUsage)
-	txFree := 1 - clamp01(txUsage)
-	idleScore := clamp01(float64(dsInfo.IdleConns) / float64(dsInfo.OpenConns))
-	uptimeScore := clamp01(float64(time.Since(node.UpTime).Seconds()) / UPTIME_OK)
+	readCap := float64(dsInfo.MaxOpenConns-dsInfo.MinWriteConns) * capacityMultiple
+	ratio := clamp01(float64(dsInfo.RunningRead) / readCap)
+	readFree := 1 - ratio*ratio
+
+	writeCap := float64(dsInfo.MaxWriteConns) * capacityMultiple
+	ratio = clamp01(float64(dsInfo.RunningWrite) / writeCap)
+	writeFree := 1 - ratio*ratio
+
+	txCap := float64(dsInfo.MaxWriteConns+dsInfo.MinWriteConns) / 2.0 * capacityMultiple
+	ratio = clamp01(float64(dsInfo.RunningTx) / txCap)
+	txFree := 1 - ratio*ratio
 
 	latScore := 1 - clamp01(math.Log1p(float64(dsInfo.LatencyP95Ms))/math.Log1p(LAT_BAD_MS))
 	errScore := 1 - clamp01(dsInfo.ErrorRate1m/ERR_RATE_BAD)
 	toutScore := 1 - clamp01(dsInfo.TimeoutRate1m/TIMEOUT_RATE_BAD)
 
+	uptimeScore := clamp01(float64(time.Since(node.UpTime).Seconds()) / UPTIME_OK)
+
 	return normalizedMetrics{
-		httpFree:    httpFree,
-		dbFree:      dbFree,
-		txFree:      txFree,
-		idleScore:   idleScore,
-		uptimeScore: uptimeScore,
+		httpFree: httpFree,
+
+		readFree:  readFree,
+		writeFree: writeFree,
+		txFree:    txFree,
 
 		latScore:  latScore,
 		errScore:  errScore,
 		toutScore: toutScore,
+
+		uptimeScore: uptimeScore,
 	}
 }
 
 func calculateScore(endpoint ENDPOINT_TYPE, m normalizedMetrics) float64 {
 
-	s := 0.0
-	if m.httpFree < 0.01 {
+	s := 0.05
+	if m.httpFree < 0.05 {
 		return s
 	}
 
 	switch endpoint {
 	case EP_Query:
 		s = 0.25*m.httpFree +
+			0.35*m.readFree +
+			0.05*m.writeFree +
+			0.05*m.txFree +
 
-			0.25*m.dbFree +
-			0.00*m.txFree +
-			0.12*m.idleScore +
-
-			0.20*m.latScore +
-			0.07*m.errScore +
+			0.15*m.latScore +
+			0.05*m.errScore +
 			0.08*m.toutScore +
 
-			0.03*m.uptimeScore
+			0.02*m.uptimeScore
 	case EP_Execute:
 		s = 0.15*m.httpFree +
-
-			0.25*m.dbFree +
-			0.10*m.txFree +
-			0.12*m.idleScore +
-
-			0.10*m.latScore +
-			0.15*m.errScore +
-			0.10*m.toutScore +
-
-			0.03*m.uptimeScore
-	case EP_BeginTx:
-		s = 0.10*m.httpFree +
-
-			0.20*m.dbFree +
-			0.20*m.txFree +
-			0.12*m.idleScore +
+			0.05*m.readFree +
+			0.35*m.writeFree +
+			0.15*m.txFree +
 
 			0.05*m.latScore +
 			0.15*m.errScore +
+			0.08*m.toutScore +
+
+			0.02*m.uptimeScore
+	case EP_BeginTx:
+		s = 0.15*m.httpFree +
+			0.05*m.readFree +
+			0.15*m.writeFree +
+			0.35*m.txFree +
+
+			0.05*m.latScore +
+			0.08*m.errScore +
 			0.15*m.toutScore +
 
-			0.03*m.uptimeScore
+			0.02*m.uptimeScore
 	}
 
 	return s

@@ -15,50 +15,46 @@ type Datasource struct {
 	DatasourceID        string
 	DatabaseName        string
 	Driver              string
-	MaxTxConns          int
-	MaxTxIdleTimeout    time.Duration
-	DefaultQueryTimeout time.Duration
 	DB                  *sql.DB
 	Readonly            bool
+	DefaultQueryTimeout time.Duration
 }
 
 // Initialize initializes datasources from configuration
-func NewDatasource(cfg global.DatasourceConfig) (*Datasource, error) {
+func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	driverName := cfg.Driver
+	driverName := config.Driver
 	if driverName == "postgres" {
 		driverName = "pgx"
 	}
 
-	db, err := sql.Open(driverName, cfg.DSN)
+	db, err := sql.Open(driverName, config.DSN)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open datasource %s: %w", cfg.DatasourceID, err)
+		return nil, fmt.Errorf("failed to open datasource %s: %w", config.DatasourceID, err)
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	if cfg.MaxConnLifetimeSec > 0 {
-		db.SetConnMaxLifetime(time.Duration(cfg.MaxConnLifetimeSec) * time.Second)
+	db.SetMaxOpenConns(config.MaxOpenConns)
+	db.SetMaxIdleConns(config.MaxIdleConns)
+	if config.MaxConnLifetimeSec > 0 {
+		db.SetConnMaxLifetime(time.Duration(config.MaxConnLifetimeSec) * time.Second)
 	}
 
 	// Ping to verify connection
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to ping datasource %s: %w", cfg.DatasourceID, err)
+		return nil, fmt.Errorf("failed to ping datasource %s: %w", config.DatasourceID, err)
 	}
 
 	return &Datasource{
-		DatasourceID:        cfg.DatasourceID,
-		DatabaseName:        cfg.DatabaseName,
+		DatasourceID:        config.DatasourceID,
+		DatabaseName:        config.DatabaseName,
 		Driver:              driverName,
-		MaxTxConns:          cfg.MaxTxConns,
-		MaxTxIdleTimeout:    time.Duration(cfg.MaxTxIdleTimeoutSec) * time.Second,
-		DefaultQueryTimeout: time.Duration(cfg.DefaultQueryTimeoutSec) * time.Second,
 		DB:                  db,
-		Readonly:            cfg.Readonly,
+		Readonly:            config.Readonly,
+		DefaultQueryTimeout: time.Duration(config.DefaultQueryTimeoutSec) * time.Second,
 	}, nil
 }
 
@@ -91,7 +87,6 @@ func (d *Datasource) ExecContext(ctx context.Context, query string, args ...inte
 	return result, err
 }
 
-// Close closes all database connections
 func (d *Datasource) Close() error {
 	if err := d.DB.Close(); err != nil {
 		return err

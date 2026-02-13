@@ -8,6 +8,8 @@ import (
 	"smartdatastream/server/global"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 var (
@@ -54,29 +56,21 @@ func (e *TxEntry) rollback() error {
 	return nil
 }
 
-func (e *TxEntry) cleanup() {
-	e.Tx.Rollback()
-	e.Conn.Close()
-}
-
 /************************************************************
  * TxDatasource manages transactions for a single datasource
  ************************************************************/
 type TxDatasource struct {
 	Datasource
-	entries map[string]*TxEntry
-	mu      sync.Mutex
-	cond    *sync.Cond
-}
+	MaxTxIdleTimeout time.Duration
 
-func (ds *TxDatasource) reserveEntry(txID string) {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
+	mu       sync.Mutex
+	semRead  *semaphore.Weighted
+	semWrite *semaphore.Weighted
+	entries  map[string]*TxEntry
 
-	for len(ds.entries) >= ds.MaxTxConns {
-		ds.cond.Wait()
-	}
-	ds.entries[txID] = nil
+	runningRead  int
+	runningWrite int
+	runningTx    int
 }
 
 func (ds *TxDatasource) registerEntry(entry *TxEntry) {
@@ -87,11 +81,53 @@ func (ds *TxDatasource) registerEntry(entry *TxEntry) {
 	ds.mu.Unlock()
 }
 
+type ResourceType int
+
+const (
+	RESOURCE_TYPE_READ ResourceType = iota
+	RESOURCE_TYPE_WRITE
+	RESOURCE_TYPE_TX
+)
+
+func (ds *TxDatasource) releaseResource(resourceType ResourceType) {
+	ds.mu.Lock()
+	switch resourceType {
+	case RESOURCE_TYPE_READ:
+		ds.runningRead--
+	case RESOURCE_TYPE_WRITE:
+		ds.runningWrite--
+	case RESOURCE_TYPE_TX:
+		ds.runningTx--
+	}
+	ds.mu.Unlock()
+
+	switch resourceType {
+	case RESOURCE_TYPE_READ:
+		ds.semRead.Release(1)
+	case RESOURCE_TYPE_WRITE:
+		ds.semWrite.Release(1)
+	case RESOURCE_TYPE_TX:
+		ds.semWrite.Release(1)
+	}
+}
+
+func (ds *TxDatasource) cleanupEntry(entry *TxEntry) {
+
+	delete(ds.entries, entry.TxID)
+	ds.runningTx--
+	ds.semWrite.Release(1)
+
+	go func() {
+		entry.Tx.Rollback()
+		entry.Conn.Close()
+	}()
+}
+
 func (ds *TxDatasource) getEntry(txID string, executing bool) (*TxEntry, error) {
 	ds.mu.Lock()
-	defer ds.mu.Unlock()
-
 	entry, ok := ds.entries[txID]
+	ds.mu.Unlock()
+
 	if !ok {
 		return nil, ErrTxNotFound
 	}
@@ -99,9 +135,9 @@ func (ds *TxDatasource) getEntry(txID string, executing bool) (*TxEntry, error) 
 	// Check if expired
 	if time.Now().After(entry.ExpiresAt) {
 		// Remove expired entry
-		delete(ds.entries, entry.TxID)
-		ds.cond.Signal() // notify waiting goroutines
-		go entry.cleanup()
+		ds.mu.Unlock()
+		ds.cleanupEntry(entry)
+		ds.mu.Lock()
 
 		return nil, ErrTxExpired
 	}
@@ -114,33 +150,12 @@ func (ds *TxDatasource) getEntry(txID string, executing bool) (*TxEntry, error) 
 	return entry, nil
 }
 
-type releaseResourceFunc func()
-
-func (ds *TxDatasource) givebackEntry(entry *TxEntry) {
-	ds.mu.Lock()
-
-	entry.executing = false
-	if entry.idleTimeout != nil {
-		entry.ExpiresAt = time.Now().Add(*entry.idleTimeout)
-	}
-
-	ds.mu.Unlock()
-}
-
-func (ds *TxDatasource) closeEntry(entry *TxEntry) {
-	ds.mu.Lock()
-
-	delete(ds.entries, entry.TxID)
-	ds.cond.Signal()
-	ds.mu.Unlock()
-
-	go entry.Conn.Close()
-}
+type ReleaseResourceFunc func()
 
 /************************************************************
  * TxManager manages transactions for all datasources
  ************************************************************/
-type TxManager struct {
+type DsManager struct {
 	dss               []*TxDatasource
 	txIDGen           *TxIDGenerator
 	stopCleanupTicker chan struct{}
@@ -148,7 +163,7 @@ type TxManager struct {
 }
 
 // NewTxManager creates a new TxManager
-func NewTxManager(configs []global.DatasourceConfig) *TxManager {
+func NewTxManager(configs []global.DatasourceConfig) *DsManager {
 	dss := make([]*TxDatasource, len(configs))
 
 	for i, config := range configs {
@@ -158,38 +173,96 @@ func NewTxManager(configs []global.DatasourceConfig) *TxManager {
 		}
 
 		txDs := &TxDatasource{
-			Datasource: *ds,
-			entries:    make(map[string]*TxEntry),
+			Datasource:       *ds,
+			MaxTxIdleTimeout: time.Duration(config.MaxTxIdleTimeoutSec) * time.Second,
+
+			semRead:  semaphore.NewWeighted(int64(config.MaxOpenConns - config.MinWriteConns)),
+			semWrite: semaphore.NewWeighted(int64(config.MaxWriteConns)),
+			entries:  make(map[string]*TxEntry),
+
+			runningRead:  0,
+			runningWrite: 0,
+			runningTx:    0,
 		}
-		txDs.cond = sync.NewCond(&txDs.mu)
 		dss[i] = txDs
 	}
-	tm := &TxManager{
+	dm := &DsManager{
 		dss:               dss,
 		txIDGen:           NewTxIDGenerator(),
 		stopCleanupTicker: make(chan struct{}),
 	}
 
 	// Start background cleanup goroutine
-	tm.wg.Add(1)
-	go tm.startCleanupTicker()
+	dm.wg.Add(1)
+	go dm.startCleanupTicker()
 
-	return tm
+	return dm
+}
+
+func (dm *DsManager) allocateResource(datasourceIdx int, resourceType ResourceType) (*TxDatasource, error) {
+	ds := dm.dss[datasourceIdx]
+	if ds == nil {
+		return nil, fmt.Errorf("datasource %d not found", datasourceIdx)
+	}
+
+	ds.mu.Lock()
+	switch resourceType {
+	case RESOURCE_TYPE_READ:
+		ds.runningRead++
+	case RESOURCE_TYPE_WRITE:
+		ds.runningWrite++
+	case RESOURCE_TYPE_TX:
+		ds.runningTx++
+	}
+	ds.mu.Unlock()
+
+	switch resourceType {
+	case RESOURCE_TYPE_READ:
+		err := ds.semRead.Acquire(context.Background(), 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire read semaphore: %w", err)
+		}
+	case RESOURCE_TYPE_WRITE:
+		err := ds.semWrite.Acquire(context.Background(), 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire write semaphore: %w", err)
+		}
+	case RESOURCE_TYPE_TX:
+		err := ds.semWrite.Acquire(context.Background(), 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire transaction semaphore: %w", err)
+		}
+	}
+
+	return ds, nil
+}
+
+func (dm *DsManager) StatsGet(datasourceIdx int) (runningRead int, runningWrite int, runningTx int) {
+	ds := dm.dss[datasourceIdx]
+	if ds == nil {
+		return 99999, 99999, 99999
+	}
+
+	ds.mu.Lock()
+	runningRead = ds.runningRead
+	runningWrite = ds.runningWrite
+	runningTx = ds.runningTx
+	ds.mu.Unlock()
+
+	return runningRead, runningWrite, runningTx
 }
 
 // Begin starts a new transaction
-func (tm *TxManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
-	txID, err := tm.txIDGen.Generate(datasourceIdx)
+func (dm *DsManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
+	txID, err := dm.txIDGen.Generate(datasourceIdx)
 	if err != nil {
 		return nil, err
 	}
 
-	ds := tm.dss[datasourceIdx]
-	if ds == nil {
-		return nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
+	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_TX)
+	if err != nil {
+		return nil, err
 	}
-
-	ds.reserveEntry(txID)
 
 	conn, tx, err := ds.newTx(isolationLevel)
 	if err != nil {
@@ -221,13 +294,13 @@ func (tm *TxManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel,
 }
 
 // Get retrieves a transaction entry and touches it
-func (tm *TxManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *TxDatasource, err error) {
-	dsIdx, err := tm.txIDGen.GetDatasourceIndex(txID)
+func (dm *DsManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *TxDatasource, err error) {
+	dsIdx, err := dm.txIDGen.GetDatasourceIndex(txID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	ds := tm.dss[dsIdx]
+	ds := dm.dss[dsIdx]
 	if ds == nil {
 		return nil, nil, fmt.Errorf("datasource not found: %d", dsIdx)
 	}
@@ -241,8 +314,8 @@ func (tm *TxManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *
 }
 
 // Commit commits a transaction
-func (tm *TxManager) Commit(txID string) error {
-	entry, _, err := tm.getTx(txID, false)
+func (dm *DsManager) Commit(txID string) error {
+	entry, _, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
@@ -257,8 +330,8 @@ func (tm *TxManager) Commit(txID string) error {
 }
 
 // Rollback rolls back a transaction
-func (tm *TxManager) Rollback(txID string) error {
-	entry, _, err := tm.getTx(txID, false)
+func (dm *DsManager) Rollback(txID string) error {
+	entry, _, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
@@ -273,22 +346,26 @@ func (tm *TxManager) Rollback(txID string) error {
 }
 
 // Rollback rolls back a transaction
-func (tm *TxManager) Close(txID string) error {
-	entry, ds, err := tm.getTx(txID, false)
+func (dm *DsManager) Close(txID string) error {
+	entry, ds, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
 
-	ds.closeEntry(entry)
+	ds.mu.Lock()
+	delete(ds.entries, entry.TxID)
+	ds.mu.Unlock()
+	go entry.Conn.Close()
 
+	ds.releaseResource(RESOURCE_TYPE_TX)
 	return nil
 }
 
 // QueryContext queries the database
-func (tm *TxManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, releaseResourceFunc, error) {
-	ds := tm.dss[datasourceIdx]
-	if ds == nil {
-		return nil, nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
+func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
+	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_READ)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
@@ -299,16 +376,17 @@ func (tm *TxManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx i
 
 	rows, err := ds.QueryContext(ctx, sql, parameters...)
 
-	releaseResource := func() {
+	releaseResourceFunc := func() {
 		cancelCtx()
+		ds.releaseResource(RESOURCE_TYPE_READ)
 	}
 
-	return rows, releaseResource, err
+	return rows, releaseResourceFunc, err
 }
 
 // QueryContext queries the database
-func (tm *TxManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, sql string, parameters ...any) (*sql.Rows, releaseResourceFunc, error) {
-	entry, ds, err := tm.getTx(txID, true)
+func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
+	entry, ds, err := dm.getTx(txID, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -321,19 +399,22 @@ func (tm *TxManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, 
 
 	rows, err := entry.QueryContext(ctx, sql, parameters...)
 
-	releaseResource := func() {
+	releaseResourceFunc := func() {
 		cancelCtx()
-		ds.givebackEntry(entry)
+		entry.executing = false
+		if entry.idleTimeout != nil {
+			entry.ExpiresAt = time.Now().Add(*entry.idleTimeout)
+		}
 	}
 
-	return rows, releaseResource, err
+	return rows, releaseResourceFunc, err
 }
 
 // ExecContext executes the database
-func (tm *TxManager) Exec(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, releaseResourceFunc, error) {
-	ds := tm.dss[datasourceIdx]
-	if ds == nil {
-		return nil, nil, fmt.Errorf("datasource not found: %d", datasourceIdx)
+func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
+	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_WRITE)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
@@ -344,16 +425,17 @@ func (tm *TxManager) Exec(ctx context.Context, timeoutSec *int, datasourceIdx in
 
 	result, err := ds.ExecContext(ctx, sql, parameters...)
 
-	releaseResource := func() {
+	releaseResourceFunc := func() {
 		cancelCtx()
+		ds.releaseResource(RESOURCE_TYPE_WRITE)
 	}
 
-	return result, releaseResource, err
+	return result, releaseResourceFunc, err
 }
 
 // ExecContext executes the database
-func (tm *TxManager) ExecTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, releaseResourceFunc, error) {
-	entry, ds, err := tm.getTx(txId, true)
+func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
+	entry, ds, err := dm.getTx(txId, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -366,94 +448,74 @@ func (tm *TxManager) ExecTx(ctx context.Context, timeoutSec *int, txId string, s
 
 	result, err := entry.ExecContext(ctx, sql, parameters...)
 
-	releaseResource := func() {
+	releaseResourceFunc := func() {
 		cancelCtx()
-		ds.givebackEntry(entry)
+		entry.executing = false
+		if entry.idleTimeout != nil {
+			entry.ExpiresAt = time.Now().Add(*entry.idleTimeout)
+		}
 	}
 
-	return result, releaseResource, err
+	return result, releaseResourceFunc, err
 }
 
 /************************************************************
- * Statistics returns the statistics of a datasource
+ * Periodically cleans up expired transactions
  ************************************************************/
-func (tm *TxManager) Stats(datasourceIdx int) (err error, openConns int, idleConns int, totalEntries int) {
-	ds := tm.dss[datasourceIdx]
-	if ds == nil {
-		return fmt.Errorf("datasource not found: %d", datasourceIdx), 0, 0, 0
-	}
-
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
-
-	stats := ds.DB.Stats()
-	openConns = stats.OpenConnections
-	idleConns = stats.Idle
-	//waitConns := int(stats.WaitCount)
-
-	return nil, openConns, idleConns, len(ds.entries)
-}
-
-/************************************************************
- * cleanupExpired periodically cleans up expired transactions
- ************************************************************/
-func (tm *TxManager) startCleanupTicker() {
-	defer tm.wg.Done()
+func (dm *DsManager) startCleanupTicker() {
+	defer dm.wg.Done()
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-tm.stopCleanupTicker: // stop cleanup
+		case <-dm.stopCleanupTicker: // stop cleanup
 			return
 		case <-ticker.C: // cleanup expired transactions
 			now := time.Now()
-			var expired []*TxEntry
 
-			for _, ds := range tm.dss {
+			for _, ds := range dm.dss {
+				expiredEntries := make([]*TxEntry, 0)
 				ds.mu.Lock()
-				removedCount := 0
 
-				for txID, entry := range ds.entries {
+				for _, entry := range ds.entries {
 					if entry == nil {
 						continue
 					}
 					if entry.executing {
 						continue
 					}
-					if now.After(entry.ExpiresAt) {
-						expired = append(expired, entry)
-						delete(ds.entries, txID)
-						removedCount++
+					if now.Before(entry.ExpiresAt) {
+						continue
 					}
+					expiredEntries = append(expiredEntries, entry)
 				}
 
-				if removedCount > 0 {
-					ds.cond.Broadcast()
+				for _, entry := range expiredEntries {
+					ds.cleanupEntry(entry)
 				}
+
 				ds.mu.Unlock()
-			}
-			// Cleanup expired entries
-			for _, entry := range expired {
-				go entry.cleanup()
 			}
 		}
 	}
 }
 
 /************************************************************
- * Shutdown stops the cleanup goroutine
+ * Shutdown stops the background cleanup goroutine
  ************************************************************/
-func (tm *TxManager) Shutdown() {
-	close(tm.stopCleanupTicker)
-	tm.wg.Wait()
+func (dm *DsManager) Shutdown() {
+	close(dm.stopCleanupTicker)
+	dm.wg.Wait()
 
 	// Rollback all remaining transactions
-	for _, ds := range tm.dss {
+	for _, ds := range dm.dss {
 		ds.mu.Lock()
+
 		for _, entry := range ds.entries {
-			entry.cleanup()
+			entry.Tx.Rollback()
+			entry.Conn.Close()
 		}
 
 		ds.Close()

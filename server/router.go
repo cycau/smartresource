@@ -20,20 +20,24 @@ import (
 
 type Router struct {
 	chi.Router
-	balancer  *cluster.Balancer
-	txManager *rdb.TxManager
+	balancer   *cluster.Balancer
+	dsManager  *rdb.DsManager
+	dmlHandler *rdb.DmlHandler
+	txHandler  *rdb.TxHandler
 }
 
-func NewRouter(balancer *cluster.Balancer, txManager *rdb.TxManager) *Router {
+func NewRouter(balancer *cluster.Balancer, dsManager *rdb.DsManager) *Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(balancer.SelectNode)
 
 	router := &Router{
-		Router:    r,
-		balancer:  balancer,
-		txManager: txManager,
+		Router:     r,
+		balancer:   balancer,
+		dsManager:  dsManager,
+		dmlHandler: rdb.NewDmlHandler(dsManager),
+		txHandler:  rdb.NewTxHandler(dsManager),
 	}
 
 	router.setupRoutes()
@@ -58,10 +62,11 @@ func (r *Router) StartCollectHealthTicker() {
 	}
 	// r.balancer.OtherNodes = otherNodes // TODO: comment out for debug
 
-	r.balancer.SelfNode.Mu.Lock()
-	r.balancer.SelfNode.Status = cluster.SERVING
-	r.balancer.SelfNode.UpTime = time.Now()
-	r.balancer.SelfNode.Mu.Unlock()
+	selfNode := r.balancer.SelfNode
+	selfNode.Mu.Lock()
+	selfNode.Status = cluster.SERVING
+	selfNode.UpTime = time.Now()
+	selfNode.Mu.Unlock()
 
 	go func() {
 		for {
@@ -75,7 +80,6 @@ const HEALZ_ERROR_INTERVAL = 15 * time.Second
 
 func (r *Router) collectHealth(isSync bool) {
 	var wg sync.WaitGroup
-
 	for _, node := range r.balancer.OtherNodes {
 		wg.Add(1)
 		go func(node *cluster.NodeInfo) {
@@ -141,18 +145,20 @@ func (r *Router) collectHealth(isSync bool) {
 
 	selfNode := r.balancer.SelfNode
 	selfNode.Mu.Lock()
-	defer selfNode.Mu.Unlock()
+	for dsIdx := range selfNode.Datasources {
+		runningRead, runningWrite, runningTx := r.dsManager.StatsGet(dsIdx)
+		latencyP95Ms, errorRate1m, timeoutRate1m := r.dmlHandler.StatsGet(dsIdx)
 
-	for i := range selfNode.Datasources {
-		_, openConns, idleConns, runningTx := r.txManager.Stats(i)
-
-		ds := &selfNode.Datasources[i]
-		ds.OpenConns = openConns
-		ds.IdleConns = idleConns
-		ds.RunningTx = runningTx
+		dsInfo := &selfNode.Datasources[dsIdx]
+		dsInfo.RunningRead = runningRead
+		dsInfo.RunningWrite = runningWrite
+		dsInfo.RunningTx = runningTx
+		dsInfo.LatencyP95Ms = latencyP95Ms
+		dsInfo.ErrorRate1m = errorRate1m
+		dsInfo.TimeoutRate1m = timeoutRate1m
 	}
-
 	selfNode.CheckTime = time.Now()
+	selfNode.Mu.Unlock()
 }
 
 /*****************************
@@ -171,15 +177,13 @@ func (r *Router) setupRoutes() {
 	// API v1 routes
 	r.Route("/rdb", func(router chi.Router) {
 		// Execute endpoint
-		execHandler := rdb.NewExecHandler(r.balancer.SelfNode, r.txManager)
-		router.Post(EP_PATH_QUERY, execHandler.Query)
-		router.Post(EP_PATH_EXECUTE, execHandler.Execute)
+		router.Post(EP_PATH_QUERY, r.dmlHandler.Query)
+		router.Post(EP_PATH_EXECUTE, r.dmlHandler.Execute)
 
 		// Transaction endpoints
-		txHandler := rdb.NewTxHandler(r.balancer.SelfNode, r.txManager)
-		router.Post(EP_PATH_BEGIN_TX, txHandler.BeginTx)
-		router.Put(EP_PATH_COMMIT_TX, txHandler.CommitTx)
-		router.Put(EP_PATH_ROLLBACK_TX, txHandler.RollbackTx)
-		router.Put(EP_PATH_DONE_TX, txHandler.DoneTx)
+		router.Post(EP_PATH_BEGIN_TX, r.txHandler.BeginTx)
+		router.Put(EP_PATH_COMMIT_TX, r.txHandler.CommitTx)
+		router.Put(EP_PATH_ROLLBACK_TX, r.txHandler.RollbackTx)
+		router.Put(EP_PATH_DONE_TX, r.txHandler.DoneTx)
 	})
 }

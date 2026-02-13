@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
-	"smartdatastream/server/cluster"
+	"sync"
 	"time"
 
 	. "smartdatastream/server/global"
 
+	"github.com/paulbellamy/ratecounter"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/shopspring/decimal"
 )
 
@@ -68,66 +72,86 @@ type ColumnMeta struct {
 	Nullable bool   `json:"nullable"`
 }
 
+const STAT_WINDOW_INTERVAL = 5 * time.Minute
+
+type StatsInfo struct {
+	mu sync.Mutex
+
+	statLatency  *prometheus.SummaryVec
+	statTotal    *ratecounter.RateCounter
+	statErrors   *ratecounter.RateCounter
+	statTimeouts *ratecounter.RateCounter
+}
+
 // ExecuteHandler handles /v1/rdb/execute requests
-type ExecHandler struct {
-	selfNode  *cluster.NodeInfo
-	txManager *TxManager
+type DmlHandler struct {
+	dsManager  *DsManager
+	statsInfos []*StatsInfo
 }
 
 /************************************************************
  * NewExecuteHandler creates a new ExecuteHandler
  ************************************************************/
-func NewExecHandler(selfNode *cluster.NodeInfo, txManager *TxManager) *ExecHandler {
-	return &ExecHandler{
-		selfNode:  selfNode,
-		txManager: txManager,
+func NewDmlHandler(dsManager *DsManager) *DmlHandler {
+	statsInfos := make([]*StatsInfo, len(dsManager.dss))
+	for i := range statsInfos {
+		var statLatency = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+			Objectives: map[float64]float64{0.95: 0.01},
+			MaxAge:     STAT_WINDOW_INTERVAL,
+		}, []string{"latency"})
+		statsInfos[i] = &StatsInfo{
+			statLatency:  statLatency,
+			statTotal:    ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+			statErrors:   ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+			statTimeouts: ratecounter.NewRateCounter(STAT_WINDOW_INTERVAL),
+		}
+	}
+	return &DmlHandler{
+		dsManager:  dsManager,
+		statsInfos: statsInfos,
 	}
 }
 
-func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
+func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	dsIDX, req, parameters, txID, err := exec.parseRequest(r)
+	dsIDX, req, parameters, txID, err := dh.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
 	log.Printf("### Executing DsIDX: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
-	// Update health info: increment RunningSql
-	exec.statsRequest(dsIDX, 1)
-	defer exec.statsRequest(dsIDX, -1)
-
 	var rows *sql.Rows
-	var releaseResource releaseResourceFunc
+	var releaseResource ReleaseResourceFunc
 	var queryErr error
 
 	if txID == "" {
 		// Execute query without transaction
-		rows, releaseResource, queryErr = exec.txManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		rows, releaseResource, queryErr = dh.dsManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
 		defer rows.Close()
 	} else {
 		// Execute query in transaction
-		rows, releaseResource, queryErr = exec.txManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
+		rows, releaseResource, queryErr = dh.dsManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
 		defer releaseResource()
 		if queryErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
@@ -214,7 +238,7 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful query
-	exec.statsResult(dsIDX, elapsedTimeMs, false, false)
+	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := QueryResponse{
@@ -229,49 +253,45 @@ func (exec *ExecHandler) Query(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
+func (dh *DmlHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	dsIDX, req, parameters, txID, err := exec.parseRequest(r)
+	dsIDX, req, parameters, txID, err := dh.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
 	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
 
-	// Update health info: increment RunningSql
-	exec.statsRequest(dsIDX, 1)
-	defer exec.statsRequest(dsIDX, -1)
-
 	var result sql.Result
-	var releaseResource releaseResourceFunc
+	var releaseResource ReleaseResourceFunc
 	var execErr error
 
 	if txID == "" {
 		// Get database
-		result, releaseResource, execErr = exec.txManager.Exec(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+		result, releaseResource, execErr = dh.dsManager.Execute(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
 		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
 	} else {
 		// Execute in transaction
-		result, releaseResource, execErr = exec.txManager.ExecTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
+		result, releaseResource, execErr = dh.dsManager.ExecuteTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
 		defer releaseResource()
 		if execErr != nil {
 			if r.Context().Err() == context.DeadlineExceeded {
-				exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, true)
+				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
 				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 				return
 			}
-			exec.statsResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
@@ -288,7 +308,7 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	elapsedTimeMs := time.Since(startTime).Milliseconds()
 
 	// Update health info: record successful execution
-	exec.statsResult(dsIDX, elapsedTimeMs, false, false)
+	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := ExecuteResponse{
@@ -301,51 +321,51 @@ func (exec *ExecHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-/************************************************************
- * statistics methods
- ************************************************************/
-func (exec *ExecHandler) statsRequest(datasourceIdx int, delta int) {
-	exec.selfNode.Mu.Lock()
+func (dh *DmlHandler) statsSetResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
+	stats := dh.statsInfos[datasourceIdx]
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
 
-	dsInfo := &exec.selfNode.Datasources[datasourceIdx]
-	dsInfo.RunningQuery += delta
-	if dsInfo.RunningQuery < 0 {
-		dsInfo.RunningQuery = 0
+	stats.statTotal.Incr(1)
+
+	if isError {
+		stats.statErrors.Incr(1)
+		return
 	}
-
-	exec.selfNode.Mu.Unlock()
+	if isTimeout {
+		stats.statTimeouts.Incr(1)
+		return
+	}
+	stats.statLatency.WithLabelValues("p95").Observe(float64(latencyMs))
 }
 
-func (exec *ExecHandler) statsResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
-	exec.selfNode.Mu.Lock()
+func (dh *DmlHandler) StatsGet(datasourceIdx int) (latencyP95Ms int, errorRate1m float64, timeoutRate1m float64) {
+	stats := dh.statsInfos[datasourceIdx]
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
 
-	// Find or create datasource info
-	dsInfo := &exec.selfNode.Datasources[datasourceIdx]
+	latency := &dto.Metric{}
+	stats.statLatency.WithLabelValues("p95").(prometheus.Metric).Write(latency)
+	p95 := latency.GetSummary().GetQuantile()[0].GetValue()
+	if math.IsNaN(p95) {
+		p95 = 16.0
+	}
 
-	dsInfo.StatsResult(latencyMs, isError, isTimeout)
+	total := float64(stats.statTotal.Rate())
+	errorRate1m = 0.0
+	timeoutRate1m = 0.0
+	if total > 0 {
+		errorRate1m = float64(stats.statErrors.Rate()) / total
+		timeoutRate1m = float64(stats.statTimeouts.Rate()) / total
+	}
 
-	exec.selfNode.Mu.Unlock()
+	return int(p95), errorRate1m, timeoutRate1m
 }
 
 /************************************************************
  * Private methods
  ************************************************************/
-/*
-POST /query?dbName=&txId=
-Body:
-
-	{
-		"requestId": "query-1234567890",
-		"sql": "SELECT * FROM users",
-		"params": [
-			{ "type": "text", "value": "John Doe" },
-			{ "type": "int64", "value": 1234567890 },
-		],
-		"timeoutMs": 30000,
-		"limitRows": 1000
-	}
-*/
-func (exec *ExecHandler) parseRequest(r *http.Request) (dsIDX int, request ExecuteRequest, params []any, txID string, err error) {
+func (dh *DmlHandler) parseRequest(r *http.Request) (dsIDX int, request ExecuteRequest, params []any, txID string, err error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("failed to parse request: %w", err)

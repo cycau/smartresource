@@ -25,7 +25,8 @@ func runServer(config global.Config) {
 	for i := range config.MyDatasources {
 		dsConfig := &config.MyDatasources[i]
 		if dsConfig.Readonly {
-			dsConfig.MaxTxConns = 0
+			dsConfig.MaxWriteConns = 0
+			dsConfig.MinWriteConns = 0
 		}
 
 		datasourceInfo[i] = *cluster.NewDatasourceInfo(*dsConfig)

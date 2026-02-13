@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"smartdatastream/server/cluster"
 	. "smartdatastream/server/global"
 	"time"
 )
@@ -20,7 +19,6 @@ type BeginTxRequest struct {
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
 type BeginTxResponse struct {
 	TxID      string    `json:"txId"`
-	NodeID    string    `json:"nodeId"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
@@ -31,28 +29,26 @@ type OkResponse struct {
 
 // TxHandler handles transaction API requests
 type TxHandler struct {
-	selfNode  *cluster.NodeInfo
-	txManager *TxManager
+	dsManager *DsManager
 }
 
 // NewTxHandler creates a new TxHandler
-func NewTxHandler(nodeInfo *cluster.NodeInfo, txManager *TxManager) *TxHandler {
+func NewTxHandler(dsManager *DsManager) *TxHandler {
 	return &TxHandler{
-		selfNode:  nodeInfo,
-		txManager: txManager,
+		dsManager: dsManager,
 	}
 }
 
 // BeginTx handles /v1/rdb/tx/begin
-func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
-	dsIDX, req, isolationLevel, err := tx.parseBeginRequest(r)
+func (th *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
+	dsIDX, req, isolationLevel, err := th.parseBeginRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := tx.txManager.Begin(dsIDX, isolationLevel, req.TimeoutSec)
+	txEntry, err := th.dsManager.Begin(dsIDX, isolationLevel, req.TimeoutSec)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
@@ -65,7 +61,6 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	response := BeginTxResponse{
 		TxID:      txEntry.TxID,
-		NodeID:    tx.selfNode.NodeID,
 		ExpiresAt: txEntry.ExpiresAt,
 	}
 
@@ -75,7 +70,7 @@ func (tx *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 }
 
 // CommitTx handles /v1/rdb/tx/commit
-func (tx *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
+func (th *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 	txID := getTxID(r)
 
 	if txID == "" {
@@ -84,7 +79,7 @@ func (tx *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Commit transaction
-	err := tx.txManager.Commit(txID)
+	err := th.dsManager.Commit(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -105,7 +100,7 @@ func (tx *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 }
 
 // RollbackTx handles /v1/rdb/tx/rollback
-func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
+func (th *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 	txID := getTxID(r)
 
 	if txID == "" {
@@ -114,7 +109,7 @@ func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rollback transaction
-	err := tx.txManager.Rollback(txID)
+	err := th.dsManager.Rollback(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -135,7 +130,7 @@ func (tx *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 }
 
 // DoneTx handles /v1/rdb/tx/done/:requestId
-func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
+func (th *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	txID := getTxID(r)
 
 	if txID == "" {
@@ -144,7 +139,7 @@ func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Close transaction
-	err := tx.txManager.Close(txID)
+	err := th.dsManager.Close(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -164,7 +159,7 @@ func (tx *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sql.IsolationLevel, error) {
+func (th *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sql.IsolationLevel, error) {
 	var req BeginTxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("failed to parse request: %w", err)
@@ -174,9 +169,6 @@ func (tx *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sq
 	dsIDX, ok := GetCtxDsIdx(r)
 	if !ok {
 		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("datasource INDEX is required")
-	}
-	if dsIDX < 0 || dsIDX >= len(tx.selfNode.Datasources) {
-		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("invalid datasource INDEX: %d", dsIDX)
 	}
 
 	isolationLevel := sql.LevelReadCommitted

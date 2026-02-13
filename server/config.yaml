@@ -16,9 +16,10 @@ myDatasources:
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 10
-    maxIdleConns: 10
+    maxWriteConns: 5
+    minWriteConns: 2
+    maxIdleConns: 2
     maxConnLifetimeSec: 1800
-    maxTxConns: 5
     maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
     readonly: false
@@ -27,9 +28,10 @@ myDatasources:
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps"
     maxOpenConns: 10
-    maxIdleConns: 10
+    maxWriteConns: 5
+    minWriteConns: 2
+    maxIdleConns: 2
     maxConnLifetimeSec: 1800
-    maxTxConns: 5
     maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
     readonly: true
