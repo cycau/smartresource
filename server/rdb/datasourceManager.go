@@ -253,7 +253,7 @@ func (dm *DsManager) StatsGet(datasourceIdx int) (runningRead int, runningWrite 
 }
 
 // Begin starts a new transaction
-func (dm *DsManager) Begin(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
+func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
 	txID, err := dm.txIDGen.Generate(datasourceIdx)
 	if err != nil {
 		return nil, err
@@ -314,7 +314,7 @@ func (dm *DsManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *
 }
 
 // Commit commits a transaction
-func (dm *DsManager) Commit(txID string) error {
+func (dm *DsManager) CommitTx(txID string) error {
 	entry, _, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
@@ -330,7 +330,7 @@ func (dm *DsManager) Commit(txID string) error {
 }
 
 // Rollback rolls back a transaction
-func (dm *DsManager) Rollback(txID string) error {
+func (dm *DsManager) RollbackTx(txID string) error {
 	entry, _, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
@@ -346,7 +346,7 @@ func (dm *DsManager) Rollback(txID string) error {
 }
 
 // Rollback rolls back a transaction
-func (dm *DsManager) Close(txID string) error {
+func (dm *DsManager) CloseTx(txID string) error {
 	entry, ds, err := dm.getTx(txID, false)
 	if err != nil {
 		return err

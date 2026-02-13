@@ -184,6 +184,6 @@ func (r *Router) setupRoutes() {
 		router.Post(EP_PATH_BEGIN_TX, r.txHandler.BeginTx)
 		router.Put(EP_PATH_COMMIT_TX, r.txHandler.CommitTx)
 		router.Put(EP_PATH_ROLLBACK_TX, r.txHandler.RollbackTx)
-		router.Put(EP_PATH_DONE_TX, r.txHandler.DoneTx)
+		router.Put(EP_PATH_CLOSE_TX, r.txHandler.CloseTx)
 	})
 }

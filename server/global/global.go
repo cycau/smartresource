@@ -3,6 +3,7 @@ package global
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 type Config struct {
@@ -15,18 +16,18 @@ type Config struct {
 }
 
 type DatasourceConfig struct {
-	DatasourceID           string `yaml:"datasourceId"`
-	DatabaseName           string `yaml:"databaseName"`
-	Driver                 string `yaml:"driver"`
-	DSN                    string `yaml:"dsn"`
-	MaxOpenConns           int    `yaml:"maxOpenConns"`
-	MaxWriteConns          int    `yaml:"maxWriteConns"`
-	MinWriteConns          int    `yaml:"minWriteConns"`
-	MaxIdleConns           int    `yaml:"maxIdleConns"`
-	MaxConnLifetimeSec     int    `yaml:"maxConnLifetimeSec"`
-	MaxTxIdleTimeoutSec    int    `yaml:"maxTxIdleTimeoutSec"`
-	DefaultQueryTimeoutSec int    `yaml:"defaultQueryTimeoutSec"`
-	Readonly               bool   `yaml:"readonly"`
+	DatasourceID       string `yaml:"datasourceId"`
+	DatabaseName       string `yaml:"databaseName"`
+	Driver             string `yaml:"driver"`
+	DSN                string `yaml:"dsn"`
+	MaxOpenConns       int    `yaml:"maxOpenConns"`
+	MaxIdleConns       int    `yaml:"maxIdleConns"`
+	MaxConnLifetimeSec int    `yaml:"maxConnLifetimeSec"`
+
+	MaxWriteConns          int `yaml:"maxWriteConns"`
+	MinWriteConns          int `yaml:"minWriteConns"`
+	MaxTxIdleTimeoutSec    int `yaml:"maxTxIdleTimeoutSec"`
+	DefaultQueryTimeoutSec int `yaml:"defaultQueryTimeoutSec"`
 }
 
 const QUERYP_DB_NAME = "_DbName"
@@ -39,7 +40,33 @@ const EP_PATH_EXECUTE = "/execute"
 const EP_PATH_BEGIN_TX = "/tx/begin"
 const EP_PATH_COMMIT_TX = "/tx/commit"
 const EP_PATH_ROLLBACK_TX = "/tx/rollback"
-const EP_PATH_DONE_TX = "/tx/done"
+const EP_PATH_CLOSE_TX = "/tx/close"
+
+// 定数定義
+type ENDPOINT_TYPE int
+
+const (
+	EP_Query ENDPOINT_TYPE = iota
+	EP_Execute
+	EP_BeginTx
+	EP_Other
+)
+
+// エンドポイントタイプ取得
+func GetEndpointType(path string) ENDPOINT_TYPE {
+
+	if strings.HasSuffix(path, EP_PATH_QUERY) {
+		return EP_Query
+	}
+	if strings.HasSuffix(path, EP_PATH_EXECUTE) {
+		return EP_Execute
+	}
+	if strings.HasSuffix(path, EP_PATH_BEGIN_TX) {
+		return EP_BeginTx
+	}
+
+	return EP_Other
+}
 
 const CTX_DS_IDX = "$S_IDX"
 

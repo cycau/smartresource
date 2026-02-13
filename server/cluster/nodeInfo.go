@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +37,6 @@ type DatasourceInfo struct {
 	DatasourceID  string `json:"datasourceId"`
 	DatabaseName  string `json:"databaseName"`
 	Active        bool   `json:"active"`
-	Readonly      bool   `json:"readonly"`
 	MaxOpenConns  int    `json:"maxOpenConns"`
 	MaxWriteConns int    `json:"maxWriteConns"`
 	MinWriteConns int    `json:"minWriteConns"`
@@ -62,7 +60,6 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 		DatasourceID:  config.DatasourceID,
 		DatabaseName:  config.DatabaseName,
 		Active:        true,
-		Readonly:      config.Readonly,
 		MaxOpenConns:  config.MaxOpenConns,
 		MaxWriteConns: config.MaxWriteConns,
 		MinWriteConns: config.MinWriteConns,
@@ -100,32 +97,6 @@ func (node *NodeInfo) Clone() NodeInfo {
 	}
 }
 
-// 定数定義
-type ENDPOINT_TYPE int
-
-const (
-	EP_Query ENDPOINT_TYPE = iota
-	EP_Execute
-	EP_BeginTx
-	EP_Other
-)
-
-// エンドポイントタイプ取得
-func GetEndpointType(path string) ENDPOINT_TYPE {
-
-	if strings.HasSuffix(path, EP_PATH_QUERY) {
-		return EP_Query
-	}
-	if strings.HasSuffix(path, EP_PATH_EXECUTE) {
-		return EP_Execute
-	}
-	if strings.HasSuffix(path, EP_PATH_BEGIN_TX) {
-		return EP_BeginTx
-	}
-
-	return EP_Other
-}
-
 /*****************************
  * スコア計算
  *****************************/
@@ -152,7 +123,7 @@ func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TY
 	if !dsInfo.Active {
 		return nil
 	}
-	if dsInfo.Readonly && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
+	if dsInfo.MaxWriteConns < 1 && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
 		return nil
 	}
 	if dsInfo.DatabaseName != tarDbName {

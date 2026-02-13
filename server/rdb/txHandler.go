@@ -48,7 +48,7 @@ func (th *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := th.dsManager.Begin(dsIDX, isolationLevel, req.TimeoutSec)
+	txEntry, err := th.dsManager.BeginTx(dsIDX, isolationLevel, req.TimeoutSec)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
@@ -79,7 +79,7 @@ func (th *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Commit transaction
-	err := th.dsManager.Commit(txID)
+	err := th.dsManager.CommitTx(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -109,7 +109,7 @@ func (th *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rollback transaction
-	err := th.dsManager.Rollback(txID)
+	err := th.dsManager.RollbackTx(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
@@ -129,8 +129,8 @@ func (th *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// DoneTx handles /v1/rdb/tx/done/:requestId
-func (th *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
+// CloseTx handles /v1/rdb/tx/done/:requestId
+func (th *TxHandler) CloseTx(w http.ResponseWriter, r *http.Request) {
 	txID := getTxID(r)
 
 	if txID == "" {
@@ -139,7 +139,7 @@ func (th *TxHandler) DoneTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Close transaction
-	err := th.dsManager.Close(txID)
+	err := th.dsManager.CloseTx(txID)
 	if err != nil {
 		if err == ErrTxNotFound {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")

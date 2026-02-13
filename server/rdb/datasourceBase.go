@@ -53,7 +53,6 @@ func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 		DatabaseName:        config.DatabaseName,
 		Driver:              driverName,
 		DB:                  db,
-		Readonly:            config.Readonly,
 		DefaultQueryTimeout: time.Duration(config.DefaultQueryTimeoutSec) * time.Second,
 	}, nil
 }
