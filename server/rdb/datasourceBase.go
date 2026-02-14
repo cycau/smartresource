@@ -3,13 +3,42 @@ package rdb
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"smartdatastream/server/global"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 )
+
+// errAsBadConn wraps an error so that errors.Is(err, driver.ErrBadConn) is true (e.g. for pgx ConnectError).
+type errAsBadConn struct{ err error }
+
+func (e *errAsBadConn) Error() string   { return e.err.Error() }
+func (e *errAsBadConn) Unwrap() error   { return e.err }
+func (e *errAsBadConn) Is(target error) bool { return target == driver.ErrBadConn }
+
+// connectErrorToErrBadConnConnector wraps a driver.Connector and converts *pgconn.ConnectError to an error that Is(driver.ErrBadConn).
+// So handlers can rely only on driver.ErrBadConn and need not import pgconn.
+type connectErrorToErrBadConnConnector struct {
+	driver.Connector
+}
+
+func (c *connectErrorToErrBadConnConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		var connectErr *pgconn.ConnectError
+		if errors.As(err, &connectErr) {
+			return nil, &errAsBadConn{err: err}
+		}
+		return nil, err
+	}
+	return conn, nil
+}
 
 type Datasource struct {
 	DatasourceID        string
@@ -30,9 +59,19 @@ func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 		driverName = "pgx"
 	}
 
-	db, err := sql.Open(driverName, config.DSN)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open datasource %s: %w", config.DatasourceID, err)
+	var db *sql.DB
+	if driverName == "pgx" {
+		connConfig, err := pgx.ParseConfig(config.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse pgx config for %s: %w", config.DatasourceID, err)
+		}
+		db = sql.OpenDB(&connectErrorToErrBadConnConnector{Connector: stdlib.GetConnector(*connConfig)})
+	} else {
+		var err error
+		db, err = sql.Open(driverName, config.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open datasource %s: %w", config.DatasourceID, err)
+		}
 	}
 
 	// Set connection pool settings

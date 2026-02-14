@@ -5,39 +5,70 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-type EndpointType int
+type endpointType int
 
 const (
-	EP_QUERY EndpointType = iota
-	EP_EXECUTE
-	EP_BEGIN_TX
-	EP_COMMIT_TX
-	EP_ROLLBACK_TX
-	EP_DONE_TX
-	EP_OTHER
+	ep_QUERY endpointType = iota
+	ep_EXECUTE
+	ep_BEGIN_TX
+	ep_COMMIT_TX
+	ep_ROLLBACK_TX
+	ep_DONE_TX
+	ep_OTHER
 )
 
-func GetEndpointPath(ep EndpointType) string {
+func getEndpointPath(ep endpointType) string {
 	switch ep {
-	case EP_QUERY:
+	case ep_QUERY:
 		return "/query"
-	case EP_EXECUTE:
+	case ep_EXECUTE:
 		return "/execute"
-	case EP_BEGIN_TX:
+	case ep_BEGIN_TX:
 		return "/tx/begin"
-	case EP_COMMIT_TX:
+	case ep_COMMIT_TX:
 		return "/tx/commit"
-	case EP_ROLLBACK_TX:
+	case ep_ROLLBACK_TX:
 		return "/tx/rollback"
-	case EP_DONE_TX:
+	case ep_DONE_TX:
 		return "/tx/done"
 	default:
 		return "/other"
 	}
+}
+
+// clientConfig は config.yaml の構造
+type clientConfig struct {
+	DefaultSecretKey string      `yaml:"defaultSecretKey"`
+	DefaultDatabase  string      `yaml:"defaultDatabase"`
+	ClusterNodes     []NodeEntry `yaml:"clusterNodes"`
+	MaxConcurrency   int         `yaml:"maxConcurrency"`
+}
+
+// nodeHealth は /healz レスポンス（サーバーと互換）
+type nodeInfo struct {
+	BaseURL      string           `yaml:"baseUrl"`
+	SecretKey    string           `yaml:"secretKey"`
+	NodeID       string           `json:"nodeId"`
+	Status       string           `json:"status"`
+	MaxHttpQueue int              `json:"maxHttpQueue"`
+	CheckTime    time.Time        `json:"checkTime"`
+	Datasources  []datasourceInfo `json:"datasources"`
+	Mu           sync.RWMutex     `json:"-"`
+}
+
+type datasourceInfo struct {
+	DatasourceID  string `json:"datasourceId"`
+	DatabaseName  string `json:"databaseName"`
+	Active        bool   `json:"active"`
+	MaxOpenConns  int    `json:"maxOpenConns"`
+	MaxWriteConns int    `json:"maxWriteConns"`
+	MinWriteConns int    `json:"minWriteConns"`
 }
 
 var DEFAULT_DATABASE = ""
@@ -123,7 +154,7 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	}
 	query := map[string]string{"_DbName": c.dbName}
 
-	resp, _, err := c.executor.Request(c.dbName, EP_QUERY, http.MethodPost, query, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, query, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +175,7 @@ func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 	}
 	query := map[string]string{"_DbName": c.dbName}
 
-	resp, _, err := c.executor.Request(c.dbName, EP_EXECUTE, http.MethodPost, query, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, query, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}

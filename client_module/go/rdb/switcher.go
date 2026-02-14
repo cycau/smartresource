@@ -32,6 +32,22 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 		return "", fmt.Errorf("No cluster nodes configured.")
 	}
 
+	httpClient = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        maxConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
+			MaxIdleConnsPerHost: maxConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
+			MaxConnsPerHost:     maxConcurrency,     // ホストあたりの同時接続上限
+			DisableKeepAlives:   false,              // Keep-Aliveを有効化
+
+			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
+		},
+	}
+
 	candidates := make([]nodeInfo, count)
 
 	errNode := ""
@@ -67,24 +83,10 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 	s.candidates = candidates
 	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
 
-	httpClient = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:      maxConcurrency * 2, // 最大アイドル接続数 TODO: configurable?
-			DisableKeepAlives: false,              // Keep-Aliveを有効化
-
-			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
-		},
-	}
-
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
-func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, query map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
+func (s *Switcher) Request(dbName string, endpoint endpointType, method string, query map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
 		return nil, -1, err
@@ -132,21 +134,21 @@ func (s *Switcher) Request(dbName string, endpoint EndpointType, method string, 
 	return s.Request(dbName, endpoint, method, query, body, redirectCount, retryCount)
 }
 
-func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint EndpointType, method string, query map[string]string, body map[string]any) (*http.Response, error) {
+func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, query map[string]string, body map[string]any) (*http.Response, error) {
 	node := &s.candidates[nodeIdx]
 
 	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, 0)
 	return resp, err
 }
 
-func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint EndpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, int, error) {
+func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, int, error) {
 	// redirect多発する場合は並列数調整役割も兼ねる
 	if err := s.sem.Acquire(context.Background(), 1); err != nil {
 		return nil, nodeIdx, err
 	}
 	defer s.sem.Release(1)
 
-	u := baseURL + "/rdb" + GetEndpointPath(endpoint)
+	u := baseURL + "/rdb" + getEndpointPath(endpoint)
 	req, err := http.NewRequest(method, u, nil)
 	if err != nil {
 		return nil, nodeIdx, err
@@ -211,7 +213,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 
 const PROBLEMATIC_NODE_CHECK_INTERVAL = 15 * time.Second
 
-func (s *Switcher) selectNode(dbName string, endpoint EndpointType) (nodeIdx int, dsIdx int, err error) {
+func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, err error) {
 	nodeIdx, dsIdx, problematicNodes, err := s.selectRandomNode(dbName, endpoint)
 
 	if err != nil {
@@ -284,7 +286,7 @@ type dsCandidate struct {
 	weight  float64
 }
 
-func (s *Switcher) selectRandomNode(dbName string, endpoint EndpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
+func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
 	if len(s.candidates) == 0 {
 		return -1, -1, nil, fmt.Errorf("Node Candidates are not initialized yet.")
 	}
@@ -314,28 +316,25 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint EndpointType) (nodeI
 				problematic = true
 				continue
 			}
-			if ds.Readonly && (endpoint == EP_EXECUTE || endpoint == EP_BEGIN_TX) {
-				continue
-			}
-			if endpoint == EP_BEGIN_TX && ds.MaxTxConns == 0 {
+			if ds.MaxWriteConns < 1 && (endpoint == ep_EXECUTE || endpoint == ep_BEGIN_TX) {
 				continue
 			}
 
-			var w float64
+			weight := 0.0
 			switch endpoint {
-			case EP_QUERY:
-				w = float64(ds.MaxOpenConns - ds.MaxTxConns)
-			case EP_EXECUTE:
-				w = float64(ds.MaxOpenConns - ds.MaxTxConns/2)
-			case EP_BEGIN_TX:
-				w = float64(ds.MaxTxConns)
+			case ep_QUERY:
+				weight = float64(ds.MaxOpenConns - ds.MinWriteConns)
+			case ep_EXECUTE:
+				weight = float64(ds.MaxWriteConns)
+			case ep_BEGIN_TX:
+				weight = float64(ds.MaxWriteConns+ds.MinWriteConns) / 2.0
 			default:
-				w = float64(ds.MaxOpenConns)
+				weight = float64(ds.MaxOpenConns)
 			}
-			if w <= 0 {
+			if weight <= 0 {
 				continue
 			}
-			dsCandidates = append(dsCandidates, dsCandidate{nodeIdx: i, dsIdx: j, weight: w})
+			dsCandidates = append(dsCandidates, dsCandidate{nodeIdx: i, dsIdx: j, weight: weight})
 		}
 		n.Mu.RUnlock()
 

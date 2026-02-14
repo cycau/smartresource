@@ -3,8 +3,10 @@ package rdb
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -137,7 +139,11 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
+			code := statusCodeForDbError(queryErr)
+			if code == http.StatusBadGateway {
+				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
+			}
+			writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
 		defer rows.Close()
@@ -152,7 +158,11 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
+			code := statusCodeForDbError(queryErr)
+			if code == http.StatusBadGateway {
+				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
+			}
+			writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
 			return
 		}
 		defer rows.Close()
@@ -278,7 +288,11 @@ func (dh *DmlHandler) Execute(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
+			code := statusCodeForDbError(execErr)
+			if code == http.StatusBadGateway {
+				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
+			}
+			writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
 	} else {
@@ -292,7 +306,11 @@ func (dh *DmlHandler) Execute(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
+			code := statusCodeForDbError(execErr)
+			if code == http.StatusBadGateway {
+				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
+			}
+			writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
 			return
 		}
 	}
@@ -529,6 +547,15 @@ func convertParam(p ParamValue) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown param type: %s", p.Type)
 	}
+}
+
+// statusCodeForDbError returns 502 for DB connection errors (driver.ErrBadConn), 503 otherwise.
+// PostgreSQL ConnectError is normalized to ErrBadConn at the datasource connector layer.
+func statusCodeForDbError(err error) int {
+	if errors.Is(err, driver.ErrBadConn) {
+		return http.StatusBadGateway
+	}
+	return http.StatusServiceUnavailable
 }
 
 func writeError(w http.ResponseWriter, statusCode int, code, message string) {

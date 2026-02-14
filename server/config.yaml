@@ -14,24 +14,22 @@ myDatasources:
   - datasourceId: pg_master
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
-    maxOpenConns: 10
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
+    maxOpenConns: 20
+    maxIdleConns: 20
     maxWriteConns: 5
     minWriteConns: 2
-    maxIdleConns: 2
     maxConnLifetimeSec: 1800
     maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
-    readonly: false
   - datasourceId: pg_slave01
     databaseName: crm-system
     driver: postgres
-    dsn: "postgres://admin:abcd1234@localhost:5432/lps"
-    maxOpenConns: 10
+    dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
+    maxOpenConns: 20
+    maxIdleConns: 20
     maxWriteConns: 5
     minWriteConns: 2
-    maxIdleConns: 2
     maxConnLifetimeSec: 1800
     maxTxIdleTimeoutSec: 15
     defaultQueryTimeoutSec: 30
-    readonly: true

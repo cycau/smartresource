@@ -1,7 +1,6 @@
 package smartclient
 
 import (
-	"sync"
 	"time"
 )
 
@@ -69,37 +68,7 @@ const (
 	Isolation_Serializable    IsolationLevel = "SERIALIZABLE"
 )
 
-// clientConfig は config.yaml の構造
-type clientConfig struct {
-	DefaultSecretKey string      `yaml:"defaultSecretKey"`
-	DefaultDatabase  string      `yaml:"defaultDatabase"`
-	ClusterNodes     []NodeEntry `yaml:"clusterNodes"`
-	MaxConcurrency   int         `yaml:"maxConcurrency"`
-}
-
 type NodeEntry struct {
 	BaseURL   string `yaml:"baseUrl"`
 	SecretKey string `yaml:"secretKey"`
-}
-
-// nodeHealth は /healz レスポンス（サーバーと互換）
-type nodeInfo struct {
-	BaseURL      string           `yaml:"baseUrl"`
-	SecretKey    string           `yaml:"secretKey"`
-	NodeID       string           `json:"nodeId"`
-	Status       string           `json:"status"`
-	MaxHttpQueue int              `json:"maxHttpQueue"`
-	CheckTime    time.Time        `json:"checkTime"`
-	Datasources  []datasourceInfo `json:"datasources"`
-	Mu           sync.RWMutex     `json:"-"`
-}
-
-type datasourceInfo struct {
-	DatasourceID string `json:"datasourceId"`
-	DatabaseName string `json:"databaseName"`
-	Active       bool   `json:"active"`
-	Readonly     bool   `json:"readonly"`
-	MaxOpenConns int    `json:"maxOpenConns"`
-	MaxIdleConns int    `json:"maxIdleConns"`
-	MaxTxConns   int    `json:"maxTxConns"`
 }

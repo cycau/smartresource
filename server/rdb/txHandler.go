@@ -54,7 +54,7 @@ func (th *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, "BEGIN_ERROR", fmt.Sprintf("Failed to begin transaction: %v", err))
+		writeError(w, statusCodeForDbError(err), "BEGIN_ERROR", fmt.Sprintf("Failed to begin transaction: %v", err))
 		return
 	}
 
@@ -85,7 +85,7 @@ func (th *TxHandler) CommitTx(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, "COMMIT_ERROR", fmt.Sprintf("Failed to commit transaction: %v", err))
+		writeError(w, statusCodeForDbError(err), "COMMIT_ERROR", fmt.Sprintf("Failed to commit transaction: %v", err))
 		return
 	}
 
@@ -115,7 +115,7 @@ func (th *TxHandler) RollbackTx(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, "ROLLBACK_ERROR", fmt.Sprintf("Failed to rollback transaction: %v", err))
+		writeError(w, statusCodeForDbError(err), "ROLLBACK_ERROR", fmt.Sprintf("Failed to rollback transaction: %v", err))
 		return
 	}
 
@@ -145,7 +145,7 @@ func (th *TxHandler) CloseTx(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "TX_NOT_FOUND", "Transaction not found")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, "CLOSE_ERROR", fmt.Sprintf("Failed to close transaction: %v", err))
+		writeError(w, statusCodeForDbError(err), "CLOSE_ERROR", fmt.Sprintf("Failed to close transaction: %v", err))
 		return
 	}
 
