@@ -193,5 +193,5 @@ func (th *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sq
 }
 
 func getTxID(r *http.Request) string {
-	return r.URL.Query().Get(QUERYP_TX_ID)
+	return r.Header.Get(HEADER_TX_ID)
 }

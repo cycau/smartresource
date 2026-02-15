@@ -385,10 +385,10 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx i
 }
 
 // QueryContext queries the database
-func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
+func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, int, error) {
 	entry, ds, err := dm.getTx(txID, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, -1, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
@@ -407,7 +407,7 @@ func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, 
 		}
 	}
 
-	return rows, releaseResourceFunc, err
+	return rows, releaseResourceFunc, entry.dsIdx, err
 }
 
 // ExecContext executes the database
@@ -434,10 +434,10 @@ func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx
 }
 
 // ExecContext executes the database
-func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
+func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, int, error) {
 	entry, ds, err := dm.getTx(txId, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, -1, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
@@ -456,7 +456,7 @@ func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec *int, txId string
 		}
 	}
 
-	return result, releaseResourceFunc, err
+	return result, releaseResourceFunc, entry.dsIdx, err
 }
 
 /************************************************************

@@ -115,70 +115,102 @@ func NewDmlHandler(dsManager *DsManager) *DmlHandler {
 }
 
 func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
+	dsIDX, ok := GetCtxDsIdx(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Datasource INDEX hasn't decided by balancer")
+		return
+	}
 
-	dsIDX, req, parameters, txID, err := dh.parseRequest(r)
+	startTime := time.Now()
+	req, parameters, err := dh.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
-	log.Printf("### Executing DsIDX: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
+	log.Printf("### Executing SQL: %s, Params: %+v", req.SQL, parameters)
 
-	var rows *sql.Rows
-	var releaseResource ReleaseResourceFunc
-	var queryErr error
-
-	if txID == "" {
-		// Execute query without transaction
-		rows, releaseResource, queryErr = dh.dsManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
-		defer releaseResource()
-		if queryErr != nil {
-			if r.Context().Err() == context.DeadlineExceeded {
-				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
-				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
-				return
-			}
-			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			code := statusCodeForDbError(queryErr)
-			if code == http.StatusBadGateway {
-				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
-			}
-			writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
+	// Execute query without transaction
+	rows, releaseResource, queryErr := dh.dsManager.Query(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+	defer releaseResource()
+	if queryErr != nil {
+		if r.Context().Err() == context.DeadlineExceeded {
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
+			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 			return
 		}
-		defer rows.Close()
-	} else {
-		// Execute query in transaction
-		rows, releaseResource, queryErr = dh.dsManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
-		defer releaseResource()
-		if queryErr != nil {
-			if r.Context().Err() == context.DeadlineExceeded {
-				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
-				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
-				return
-			}
-			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			code := statusCodeForDbError(queryErr)
-			if code == http.StatusBadGateway {
-				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
-			}
-			writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
-			return
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		code := statusCodeForDbError(queryErr)
+		if code == http.StatusBadGateway {
+			log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
 		}
-		defer rows.Close()
+		writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
+		return
 	}
+	defer rows.Close()
+
+	if err := dh.responseQueryResult(w, rows, *req.LimitRows, startTime); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Failed to read result rows: %v", err))
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		return
+	}
+
+	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
+}
+
+func (dh *DmlHandler) QueryTx(w http.ResponseWriter, r *http.Request) {
+	txID := r.Header.Get(HEADER_TX_ID)
+	if txID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "TxID is required")
+		return
+	}
+
+	startTime := time.Now()
+	req, parameters, err := dh.parseRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
+		return
+	}
+	log.Printf("### Executing TxID: %s, SQL: %s, Params: %+v", txID, req.SQL, parameters)
+
+	// Execute query in transaction
+	rows, releaseResource, dsIDX, queryErr := dh.dsManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
+	defer releaseResource()
+	if queryErr != nil {
+		if r.Context().Err() == context.DeadlineExceeded {
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
+			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
+			return
+		}
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		code := statusCodeForDbError(queryErr)
+		if code == http.StatusBadGateway {
+			log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, queryErr)
+		}
+		writeError(w, code, "QUERY_ERROR", fmt.Sprintf("Query failed: %v", queryErr))
+		return
+	}
+	defer rows.Close()
+
+	if err := dh.responseQueryResult(w, rows, *req.LimitRows, startTime); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Failed to read result rows: %v", err))
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		return
+	}
+
+	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
+}
+
+func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows, limit int, startTime time.Time) error {
 
 	// Get column information
 	columns, err := rows.Columns()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Failed to get columns: %v", err))
-		return
+		return fmt.Errorf("failed to get columns: %w", err)
 	}
 
 	columnTypes, err := rows.ColumnTypes()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Failed to get column types: %v", err))
-		return
+		return fmt.Errorf("failed to get column types: %w", err)
 	}
 
 	// Build column metadata
@@ -192,13 +224,12 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Read rows
-	var resultRows []any
-	limit := 1000
-	if req.LimitRows != nil && *req.LimitRows > 0 {
-		limit = *req.LimitRows
+	if limit < 1 {
+		limit = math.MaxInt32
 	}
 
+	// Read rows
+	var resultRows []any
 	rowCount := 0
 	for rows.Next() {
 		if rowCount >= limit {
@@ -214,8 +245,7 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := rows.Scan(valuePtrs...); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Failed to scan row: %v", err))
-			return
+			return fmt.Errorf("failed to scan row: %w", err)
 		}
 
 		for i, val := range values {
@@ -240,15 +270,11 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "QUERY_ERROR", fmt.Sprintf("Row iteration error: %v", err))
-		return
+		return fmt.Errorf("row iteration error: %w", err)
 	}
 
 	// Calculate execution time
 	elapsedTimeMs := time.Since(startTime).Milliseconds()
-
-	// Update health info: record successful query
-	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
 
 	// Write response
 	response := QueryResponse{
@@ -261,58 +287,102 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+	return nil
 }
 
 func (dh *DmlHandler) Execute(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
+	dsIDX, ok := GetCtxDsIdx(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Datasource INDEX hasn't decided by balancer")
+		return
+	}
 
-	dsIDX, req, parameters, txID, err := dh.parseRequest(r)
+	startTime := time.Now()
+	req, parameters, err := dh.parseRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
 		return
 	}
-	log.Printf("### Executing DsId: %d, Query: %s, Params: %+v, TxID: %s", dsIDX, req.SQL, parameters, txID)
+	log.Printf("### Executing Query: %s, Params: %+v", req.SQL, parameters)
 
 	var result sql.Result
 	var releaseResource ReleaseResourceFunc
 	var execErr error
 
+	// Get database
+	result, releaseResource, execErr = dh.dsManager.Execute(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
+	defer releaseResource()
+	if execErr != nil {
+		if r.Context().Err() == context.DeadlineExceeded {
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
+			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
+			return
+		}
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		code := statusCodeForDbError(execErr)
+		if code == http.StatusBadGateway {
+			log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
+		}
+		writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
+		return
+	}
+
+	// Get affected rows
+	affectedRows, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "EXEC_ERROR", fmt.Sprintf("Failed to get affected rows: %v", err))
+		return
+	}
+
+	// Calculate execution time
+	elapsedTimeMs := time.Since(startTime).Milliseconds()
+
+	// Update health info: record successful execution
+	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
+
+	// Write response
+	response := ExecuteResponse{
+		EffectedRows:  affectedRows,
+		ElapsedTimeMs: elapsedTimeMs,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (dh *DmlHandler) ExecuteTx(w http.ResponseWriter, r *http.Request) {
+	txID := r.Header.Get(HEADER_TX_ID)
 	if txID == "" {
-		// Get database
-		result, releaseResource, execErr = dh.dsManager.Execute(r.Context(), req.TimeoutSec, dsIDX, req.SQL, parameters...)
-		defer releaseResource()
-		if execErr != nil {
-			if r.Context().Err() == context.DeadlineExceeded {
-				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
-				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
-				return
-			}
-			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			code := statusCodeForDbError(execErr)
-			if code == http.StatusBadGateway {
-				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
-			}
-			writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "TxID is required")
+		return
+	}
+
+	startTime := time.Now()
+
+	req, parameters, err := dh.parseRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("Failed to parse request: %v", err))
+		return
+	}
+	log.Printf("### Executing TxID: %s, SQL: %s, Params: %+v", txID, req.SQL, parameters)
+
+	// Execute in transaction
+	result, releaseResource, dsIDX, execErr := dh.dsManager.ExecuteTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
+	defer releaseResource()
+	if execErr != nil {
+		if r.Context().Err() == context.DeadlineExceeded {
+			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
+			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
 			return
 		}
-	} else {
-		// Execute in transaction
-		result, releaseResource, execErr = dh.dsManager.ExecuteTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
-		defer releaseResource()
-		if execErr != nil {
-			if r.Context().Err() == context.DeadlineExceeded {
-				dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
-				writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
-				return
-			}
-			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
-			code := statusCodeForDbError(execErr)
-			if code == http.StatusBadGateway {
-				log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
-			}
-			writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
-			return
+		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
+		code := statusCodeForDbError(execErr)
+		if code == http.StatusBadGateway {
+			log.Printf("[502] DB connection error (dsIDX=%d): %v", dsIDX, execErr)
 		}
+		writeError(w, code, "EXEC_ERROR", fmt.Sprintf("Exec failed: %v", execErr))
+		return
 	}
 
 	// Get affected rows
@@ -383,30 +453,23 @@ func (dh *DmlHandler) StatsGet(datasourceIdx int) (latencyP95Ms int, errorRate1m
 /************************************************************
  * Private methods
  ************************************************************/
-func (dh *DmlHandler) parseRequest(r *http.Request) (dsIDX int, request ExecuteRequest, params []any, txID string, err error) {
+func (dh *DmlHandler) parseRequest(r *http.Request) (request ExecuteRequest, params []any, err error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("failed to parse request: %w", err)
+		return ExecuteRequest{}, nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	if req.SQL == "" {
-		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("SQL is required")
-	}
-
-	txID = r.URL.Query().Get(QUERYP_TX_ID)
-	// get datasource index from context
-	dsIDX, ok := GetCtxDsIdx(r)
-	if !ok && txID == "" {
-		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("Datasource INDEX hasn't decided")
+		return ExecuteRequest{}, nil, fmt.Errorf("SQL is required")
 	}
 
 	// Convert params
 	parameters, err := convertParams(req.Params)
 	if err != nil {
-		return -1, ExecuteRequest{}, nil, "", fmt.Errorf("failed to convert params: %w", err)
+		return ExecuteRequest{}, nil, fmt.Errorf("failed to convert params: %w", err)
 	}
 
-	return dsIDX, req, parameters, txID, nil
+	return req, parameters, nil
 }
 
 func convertParams(params []ParamValue) ([]any, error) {
@@ -549,15 +612,6 @@ func convertParam(p ParamValue) (any, error) {
 	}
 }
 
-// statusCodeForDbError returns 502 for DB connection errors (driver.ErrBadConn), 503 otherwise.
-// PostgreSQL ConnectError is normalized to ErrBadConn at the datasource connector layer.
-func statusCodeForDbError(err error) int {
-	if errors.Is(err, driver.ErrBadConn) {
-		return http.StatusBadGateway
-	}
-	return http.StatusServiceUnavailable
-}
-
 func writeError(w http.ResponseWriter, statusCode int, code, message string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(statusCode)
@@ -569,4 +623,13 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string) {
 		},
 	}
 	json.NewEncoder(w).Encode(errorResp)
+}
+
+// statusCodeForDbError returns 502 for DB connection errors (driver.ErrBadConn), 503 otherwise.
+// PostgreSQL ConnectError is normalized to ErrBadConn at the datasource connector layer.
+func statusCodeForDbError(err error) int {
+	if errors.Is(err, driver.ErrBadConn) {
+		return http.StatusBadGateway
+	}
+	return http.StatusServiceUnavailable
 }

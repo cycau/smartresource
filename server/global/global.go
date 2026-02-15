@@ -30,17 +30,17 @@ type DatasourceConfig struct {
 	DefaultQueryTimeoutSec int `yaml:"defaultQueryTimeoutSec"`
 }
 
-const QUERYP_DB_NAME = "_DbName"
-const QUERYP_TX_ID = "_TxID"
-const QUERYP_DS_ID = "_DsID"
-const QUERYP_REDIRECT_COUNT = "_RCount"
+const HEADER_SECRET_KEY = "X-Secret-Key"
+const HEADER_DB_NAME = "_Cy_DbName"
+const HEADER_TX_ID = "_Cy_TxID"
+const HEADER_REDIRECT_COUNT = "_Cy_RdCount"
 
 const EP_PATH_QUERY = "/query"
 const EP_PATH_EXECUTE = "/execute"
-const EP_PATH_BEGIN_TX = "/tx/begin"
-const EP_PATH_COMMIT_TX = "/tx/commit"
-const EP_PATH_ROLLBACK_TX = "/tx/rollback"
-const EP_PATH_CLOSE_TX = "/tx/close"
+const EP_PATH_TX_BEGIN = "/begin"
+const EP_PATH_TX_COMMIT = "/commit"
+const EP_PATH_TX_ROLLBACK = "/rollback"
+const EP_PATH_TX_CLOSE = "/close"
 
 // 定数定義
 type ENDPOINT_TYPE int
@@ -61,7 +61,7 @@ func GetEndpointType(path string) ENDPOINT_TYPE {
 	if strings.HasSuffix(path, EP_PATH_EXECUTE) {
 		return EP_Execute
 	}
-	if strings.HasSuffix(path, EP_PATH_BEGIN_TX) {
+	if strings.HasSuffix(path, EP_PATH_TX_BEGIN) {
 		return EP_BeginTx
 	}
 
@@ -74,6 +74,6 @@ func GetCtxDsIdx(r *http.Request) (int, bool) {
 	value, ok := r.Context().Value(CTX_DS_IDX).(int)
 	return value, ok
 }
-func PutCtxDsIdx(r *http.Request, value any) *http.Request {
+func PutCtxDsIdx(r *http.Request, value int) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), CTX_DS_IDX, value))
 }
