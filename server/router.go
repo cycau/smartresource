@@ -181,9 +181,13 @@ func (r *Router) setupRoutes() {
 		router.Post(EP_PATH_EXECUTE, r.dmlHandler.Execute)
 
 		// Transaction endpoints
-		router.Post(EP_PATH_BEGIN_TX, r.txHandler.BeginTx)
-		router.Put(EP_PATH_COMMIT_TX, r.txHandler.CommitTx)
-		router.Put(EP_PATH_ROLLBACK_TX, r.txHandler.RollbackTx)
-		router.Put(EP_PATH_CLOSE_TX, r.txHandler.CloseTx)
+		router.Route("/tx", func(txRouter chi.Router) {
+			txRouter.Post(EP_PATH_TX_BEGIN, r.txHandler.BeginTx)
+			txRouter.Post(EP_PATH_QUERY, r.dmlHandler.QueryTx)
+			txRouter.Post(EP_PATH_EXECUTE, r.dmlHandler.ExecuteTx)
+			txRouter.Put(EP_PATH_TX_COMMIT, r.txHandler.CommitTx)
+			txRouter.Put(EP_PATH_TX_ROLLBACK, r.txHandler.RollbackTx)
+			txRouter.Put(EP_PATH_TX_CLOSE, r.txHandler.CloseTx)
+		})
 	})
 }

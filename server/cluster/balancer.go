@@ -35,21 +35,15 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		secretKey := r.Header.Get("X-Secret-Key")
+		secretKey := r.Header.Get(HEADER_SECRET_KEY)
 		if secretKey != b.SelfNode.SecretKey {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		err, endpoint, tarDbName, txID, dsID, redirectCount := parseRequest(r)
+		err, endpoint, tarDbName, txID, redirectCount := parseRequest(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// 対象外のパスはそのまま処理
-		if endpoint == EP_Other {
-			next.ServeHTTP(w, r)
 			return
 		}
 
@@ -63,21 +57,15 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			b.SelfNode.Mu.Unlock()
 		}()
 
-		// トランザクション処理は常に受け入れる（優先処理）
-		if txID != "" {
+		// 対象外のパスはそのまま処理
+		if endpoint == EP_Other {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Datasource指定がある場合はそのまま処理
-		if dsID != "" {
-			for idx, ds := range b.SelfNode.Datasources {
-				if ds.DatasourceID == dsID {
-					next.ServeHTTP(w, PutCtxDsIdx(r, idx))
-					return
-				}
-			}
-			http.Error(w, `Invalid datasource ID [`+dsID+`]`, http.StatusBadRequest)
+		// トランザクション処理は常に受け入れる（優先処理）
+		if txID != "" {
+			next.ServeHTTP(w, r)
 			return
 		}
 
@@ -133,22 +121,10 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 }
 
 func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *ScoreWithWeight, recommendScore *ScoreWithWeight) {
-	selfNode.Mu.Lock()
-	defer selfNode.Mu.Unlock()
 
-	scores := make([]*ScoreWithWeight, 0, len(selfNode.Datasources))
-
-	for dsIdx := range selfNode.Datasources {
-
-		score := selfNode.GetScore(dsIdx, tarDbName, endpoint)
-		if score == nil {
-			continue
-		}
-
-		scores = append(scores, score)
-	}
-
+	scores := selfNode.GetScore(tarDbName, endpoint)
 	log.Printf("#Self Node Scores: %+v", scores)
+
 	// ノード選択（TopK + Weighted Random）
 	best, bestRandom := selectBestRandomScore(scores)
 	if best == nil {
@@ -164,22 +140,14 @@ func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOIN
 }
 
 func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (recommendNodeScore *ScoreWithWeight, recommendNode *NodeInfo) {
-	scores := make([]*ScoreWithWeight, 0, 255)
+	scores := make([]*ScoreWithWeight, 0, 8)
 
 	for nodeIdx, node := range otherNodes {
-		node.Mu.Lock()
-
-		for dsIdx := range node.Datasources {
-			score := node.GetScore(dsIdx, tarDbName, endpoint)
-			if score == nil {
-				continue
-			}
-
+		nodeScores := node.GetScore(tarDbName, endpoint)
+		for _, score := range nodeScores {
 			score.exIndex = nodeIdx
-			scores = append(scores, score)
 		}
-
-		node.Mu.Unlock()
+		scores = append(scores, nodeScores...)
 	}
 
 	// ノード選択
@@ -238,29 +206,12 @@ func selectBestRandomScore(scores []*ScoreWithWeight) (bestScore *ScoreWithWeigh
 }
 
 // parse request and return endpoint, database name, and transaction ID
-func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName string, txID string, dsID string, redirectCount int) {
+func parseRequest(r *http.Request) (err error, endpoint ENDPOINT_TYPE, dbName string, txID string, redirectCount int) {
 
-	query := r.URL.Query()
-	dbName = query.Get(QUERYP_DB_NAME)
-	txID = query.Get(QUERYP_TX_ID)
-	dsID = query.Get(QUERYP_DS_ID)
-	redirectCount, err = strconv.Atoi(query.Get(QUERYP_REDIRECT_COUNT))
 	endpoint = GetEndpointType(r.URL.Path)
+	dbName = r.Header.Get(HEADER_DB_NAME)
+	txID = r.Header.Get(HEADER_TX_ID)
+	redirectCount, err = strconv.Atoi(r.Header.Get(HEADER_REDIRECT_COUNT))
 
-	switch endpoint {
-	case EP_Query:
-		if dbName == "" && txID == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
-		}
-	case EP_Execute:
-		if dbName == "" && txID == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _TxID ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
-		}
-	case EP_BeginTx:
-		if dbName == "" && dsID == "" {
-			return fmt.Errorf("require query parameters [ _DbName ] [ _DsID ]"), endpoint, dbName, txID, dsID, redirectCount
-		}
-	}
-
-	return nil, endpoint, dbName, txID, dsID, redirectCount
+	return nil, endpoint, dbName, txID, redirectCount
 }

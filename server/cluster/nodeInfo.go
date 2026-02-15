@@ -109,43 +109,52 @@ const (
 	TOP_K     = 3     // スコア上位TopK
 )
 
-func (node *NodeInfo) GetScore(dsIdx int, tarDbName string, endpoint ENDPOINT_TYPE) *ScoreWithWeight {
+func (node *NodeInfo) GetScore(tarDbName string, endpoint ENDPOINT_TYPE) []*ScoreWithWeight {
+	node.Mu.Lock()
+	defer node.Mu.Unlock()
 
-	if node.Status != SERVING {
-		return nil
-	}
-	if node.RunningHttp >= node.MaxHttpQueue {
-		return nil
+	scores := make([]*ScoreWithWeight, 0, len(node.Datasources))
+
+	for dsIdx := range node.Datasources {
+
+		if node.Status != SERVING {
+			return scores
+		}
+		if node.RunningHttp >= node.MaxHttpQueue {
+			return scores
+		}
+
+		dsInfo := &node.Datasources[dsIdx]
+
+		if !dsInfo.Active {
+			return scores
+		}
+		if dsInfo.MaxWriteConns < 1 && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
+			return scores
+		}
+		if dsInfo.DatabaseName != tarDbName {
+			return scores
+		}
+
+		m := calculateMetrics(node, dsInfo)
+		score := calculateScore(endpoint, m)
+
+		weight := 0.0
+		switch endpoint {
+		case EP_Query:
+			weight = float64(dsInfo.MaxOpenConns - dsInfo.MinWriteConns)
+		case EP_Execute:
+			weight = float64(dsInfo.MaxWriteConns)
+		case EP_BeginTx:
+			weight = float64(dsInfo.MaxWriteConns+dsInfo.MinWriteConns) / 2.0
+		default:
+			weight = float64(dsInfo.MaxOpenConns)
+		}
+
+		scores = append(scores, &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx})
 	}
 
-	dsInfo := &node.Datasources[dsIdx]
-
-	if !dsInfo.Active {
-		return nil
-	}
-	if dsInfo.MaxWriteConns < 1 && (endpoint == EP_Execute || endpoint == EP_BeginTx) {
-		return nil
-	}
-	if dsInfo.DatabaseName != tarDbName {
-		return nil
-	}
-
-	m := calculateMetrics(node, dsInfo)
-	score := calculateScore(endpoint, m)
-
-	weight := 0.0
-	switch endpoint {
-	case EP_Query:
-		weight = float64(dsInfo.MaxOpenConns - dsInfo.MinWriteConns)
-	case EP_Execute:
-		weight = float64(dsInfo.MaxWriteConns)
-	case EP_BeginTx:
-		weight = float64(dsInfo.MaxWriteConns+dsInfo.MinWriteConns) / 2.0
-	default:
-		weight = float64(dsInfo.MaxOpenConns)
-	}
-
-	return &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx}
+	return scores
 }
 
 // 正規化された指標を計算
