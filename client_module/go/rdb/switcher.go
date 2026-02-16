@@ -86,14 +86,14 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
-func (s *Switcher) Request(dbName string, endpoint endpointType, method string, query map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
+func (s *Switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
 		return nil, -1, err
 	}
 	node := &s.candidates[nodeIdx]
 
-	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, redirectCount)
+	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount)
 	if resp == nil {
 		return nil, nodeIdx, err
 	}
@@ -131,17 +131,17 @@ func (s *Switcher) Request(dbName string, endpoint endpointType, method string, 
 	}
 
 	// retry
-	return s.Request(dbName, endpoint, method, query, body, redirectCount, retryCount)
+	return s.Request(dbName, endpoint, method, headers, body, redirectCount, retryCount)
 }
 
-func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, query map[string]string, body map[string]any) (*http.Response, error) {
+func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any) (*http.Response, error) {
 	node := &s.candidates[nodeIdx]
 
-	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, query, body, 0)
+	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0)
 	return resp, err
 }
 
-func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, query map[string]string, body any, redirectCount int) (*http.Response, int, error) {
+func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int) (*http.Response, int, error) {
 	// redirect多発する場合は並列数調整役割も兼ねる
 	if err := s.sem.Acquire(context.Background(), 1); err != nil {
 		return nil, nodeIdx, err
@@ -153,15 +153,13 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	if err != nil {
 		return nil, nodeIdx, err
 	}
-	q := req.URL.Query()
-	for k, v := range query {
-		q.Set(k, v)
-	}
-	q.Set("_RCount", strconv.Itoa(redirectCount))
-
-	req.URL.RawQuery = q.Encode()
-	req.Header.Set("X-Secret-Key", secretKey)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set(HEADER_SECRET_KEY, secretKey)
+	req.Header.Set(HEADER_REDIRECT_COUNT, strconv.Itoa(redirectCount))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
 	if body != nil {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -204,7 +202,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		redirectNode := &s.candidates[i]
 		if redirectNode.NodeID == redirectNodeId {
 			//log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
-			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, query, body, redirectCount)
+			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, headers, body, redirectCount)
 		}
 	}
 
@@ -316,7 +314,7 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeI
 				problematic = true
 				continue
 			}
-			if ds.MaxWriteConns < 1 && (endpoint == ep_EXECUTE || endpoint == ep_BEGIN_TX) {
+			if ds.MaxWriteConns < 1 && (endpoint == ep_EXECUTE || endpoint == ep_TX_BEGIN) {
 				continue
 			}
 
@@ -326,7 +324,7 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeI
 				weight = float64(ds.MaxOpenConns - ds.MinWriteConns)
 			case ep_EXECUTE:
 				weight = float64(ds.MaxWriteConns)
-			case ep_BEGIN_TX:
+			case ep_TX_BEGIN:
 				weight = float64(ds.MaxWriteConns+ds.MinWriteConns) / 2.0
 			default:
 				weight = float64(ds.MaxOpenConns)

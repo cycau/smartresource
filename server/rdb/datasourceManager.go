@@ -162,8 +162,8 @@ type DsManager struct {
 	wg                sync.WaitGroup
 }
 
-// NewTxManager creates a new TxManager
-func NewTxManager(configs []global.DatasourceConfig) *DsManager {
+// NewDsManager creates a new DsManager
+func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 	dss := make([]*TxDatasource, len(configs))
 
 	for i, config := range configs {
@@ -199,7 +199,7 @@ func NewTxManager(configs []global.DatasourceConfig) *DsManager {
 	return dm
 }
 
-func (dm *DsManager) allocateResource(datasourceIdx int, resourceType ResourceType) (*TxDatasource, error) {
+func (dm *DsManager) allocateResource(ctx context.Context, datasourceIdx int, resourceType ResourceType) (*TxDatasource, error) {
 	ds := dm.dss[datasourceIdx]
 	if ds == nil {
 		return nil, fmt.Errorf("datasource %d not found", datasourceIdx)
@@ -218,17 +218,17 @@ func (dm *DsManager) allocateResource(datasourceIdx int, resourceType ResourceTy
 
 	switch resourceType {
 	case RESOURCE_TYPE_READ:
-		err := ds.semRead.Acquire(context.Background(), 1)
+		err := ds.semRead.Acquire(ctx, 1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to acquire read semaphore: %w", err)
 		}
 	case RESOURCE_TYPE_WRITE:
-		err := ds.semWrite.Acquire(context.Background(), 1)
+		err := ds.semWrite.Acquire(ctx, 1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to acquire write semaphore: %w", err)
 		}
 	case RESOURCE_TYPE_TX:
-		err := ds.semWrite.Acquire(context.Background(), 1)
+		err := ds.semWrite.Acquire(ctx, 1)
 		if err != nil {
 			return nil, fmt.Errorf("failed to acquire transaction semaphore: %w", err)
 		}
@@ -259,13 +259,15 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLeve
 		return nil, err
 	}
 
-	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_TX)
+	ds, err := dm.allocateResource(context.Background(), datasourceIdx, RESOURCE_TYPE_TX)
 	if err != nil {
+		ds.releaseResource(RESOURCE_TYPE_TX)
 		return nil, err
 	}
 
 	conn, tx, err := ds.newTx(isolationLevel)
 	if err != nil {
+		ds.releaseResource(RESOURCE_TYPE_TX)
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
 
@@ -363,10 +365,12 @@ func (dm *DsManager) CloseTx(txID string) error {
 
 // QueryContext queries the database
 func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
-	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_READ)
+	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_READ)
 	if err != nil {
+		ds.releaseResource(RESOURCE_TYPE_READ)
 		return nil, nil, err
 	}
+	time.Sleep(5 * time.Second)
 
 	timeout := ds.DefaultQueryTimeout
 	if timeoutSec != nil {
@@ -412,8 +416,9 @@ func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, 
 
 // ExecContext executes the database
 func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
-	ds, err := dm.allocateResource(datasourceIdx, RESOURCE_TYPE_WRITE)
+	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_WRITE)
 	if err != nil {
+		ds.releaseResource(RESOURCE_TYPE_WRITE)
 		return nil, nil, err
 	}
 

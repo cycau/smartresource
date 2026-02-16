@@ -47,7 +47,7 @@ func NewRouter(balancer *cluster.Balancer, dsManager *rdb.DsManager) *Router {
 /*****************************
  * 各ノードの health 情報を取得
  *****************************/
-func (r *Router) StartCollectHealthTicker() {
+func (r *Router) StartHealthTicker() {
 	// wait for http server to start
 	time.Sleep(500 * time.Millisecond)
 	// collect once at startup
@@ -156,6 +156,8 @@ func (r *Router) collectHealth(isSync bool) {
 		dsInfo.LatencyP95Ms = latencyP95Ms
 		dsInfo.ErrorRate1m = errorRate1m
 		dsInfo.TimeoutRate1m = timeoutRate1m
+
+		log.Printf("###[Router] Self Node Datasource[%d] Stats: HttpQueue[%d], RunningRead[%d], RunningWrite[%d], RunningTx[%d], LatencyP95Ms[%d], ErrorRate1m[%f], TimeoutRate1m[%f]", dsIdx, selfNode.RunningHttp, runningRead, runningWrite, runningTx, latencyP95Ms, errorRate1m, timeoutRate1m)
 	}
 	selfNode.CheckTime = time.Now()
 	selfNode.Mu.Unlock()

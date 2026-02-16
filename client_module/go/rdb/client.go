@@ -16,10 +16,12 @@ type endpointType int
 const (
 	ep_QUERY endpointType = iota
 	ep_EXECUTE
-	ep_BEGIN_TX
-	ep_COMMIT_TX
-	ep_ROLLBACK_TX
-	ep_DONE_TX
+	ep_TX_BEGIN
+	ep_TX_QUERY
+	ep_TX_EXECUTE
+	ep_TX_COMMIT
+	ep_TX_ROLLBACK
+	ep_TX_CLOSE
 	ep_OTHER
 )
 
@@ -29,18 +31,27 @@ func getEndpointPath(ep endpointType) string {
 		return "/query"
 	case ep_EXECUTE:
 		return "/execute"
-	case ep_BEGIN_TX:
+	case ep_TX_BEGIN:
 		return "/tx/begin"
-	case ep_COMMIT_TX:
+	case ep_TX_QUERY:
+		return "/tx/query"
+	case ep_TX_EXECUTE:
+		return "/tx/execute"
+	case ep_TX_COMMIT:
 		return "/tx/commit"
-	case ep_ROLLBACK_TX:
+	case ep_TX_ROLLBACK:
 		return "/tx/rollback"
-	case ep_DONE_TX:
-		return "/tx/done"
+	case ep_TX_CLOSE:
+		return "/tx/close"
 	default:
 		return "/other"
 	}
 }
+
+const HEADER_SECRET_KEY = "X-Secret-Key"
+const HEADER_DB_NAME = "_Cy_DbName"
+const HEADER_TX_ID = "_Cy_TxID"
+const HEADER_REDIRECT_COUNT = "_Cy_RdCount"
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
@@ -142,6 +153,9 @@ type Params []ParamValue
 
 func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
 
+	headers := map[string]string{
+		HEADER_DB_NAME: c.dbName,
+	}
 	body := map[string]any{
 		"sql":    sql,
 		"params": params,
@@ -152,9 +166,8 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 	if opts.TimeoutSec > 0 {
 		body["timeoutSec"] = opts.TimeoutSec
 	}
-	query := map[string]string{"_DbName": c.dbName}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, query, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -169,13 +182,15 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 
 func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 
+	headers := map[string]string{
+		HEADER_DB_NAME: c.dbName,
+	}
 	body := map[string]any{
 		"sql":    sql,
 		"params": params,
 	}
-	query := map[string]string{"_DbName": c.dbName}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, query, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3)
 	if err != nil {
 		return nil, err
 	}

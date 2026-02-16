@@ -1,6 +1,6 @@
 nodeName: "dbapi-1"
 nodePort: 5678
-maxHttpQueue: 1000
+maxHttpQueue: 10000
 secretKey: "secret-key"
 
 clusterNodes:

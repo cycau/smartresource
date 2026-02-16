@@ -34,8 +34,8 @@ func runServer(config global.Config) {
 		datasourceInfo[i] = *cluster.NewDatasourceInfo(*dsConfig)
 	}
 
-	// Initialize TxManager
-	txManager := rdb.NewTxManager(config.MyDatasources)
+	// Initialize DsManager
+	dsManager := rdb.NewDsManager(config.MyDatasources)
 
 	// Set maxHttpQueue for HTTP connection limiting
 	maxHttpQueue := config.MaxHttpQueue
@@ -65,7 +65,7 @@ func runServer(config global.Config) {
 	balancer := cluster.NewBalancer(thisNode, clusterNodes)
 
 	// Create router
-	router := NewRouter(balancer, txManager)
+	router := NewRouter(balancer, dsManager)
 
 	// Create HTTP server
 	server := &http.Server{
@@ -85,7 +85,7 @@ func runServer(config global.Config) {
 		}
 	}()
 
-	router.StartCollectHealthTicker()
+	router.StartHealthTicker()
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
@@ -104,8 +104,8 @@ func runServer(config global.Config) {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
-	// Shutdown TxManager
-	txManager.Shutdown()
+	// Shutdown DsManager
+	dsManager.Shutdown()
 
 	log.Println("Server exited")
 }

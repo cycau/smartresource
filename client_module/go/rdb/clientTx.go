@@ -63,11 +63,11 @@ func (c *TxClient) GetTxId() string {
 }
 
 func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
-
+	headers := map[string]string{
+		HEADER_DB_NAME: databaseName,
+	}
 	body := map[string]any{"isolationLevel": isolationLevel}
-	query := map[string]string{"_DbName": databaseName}
-
-	resp, nodeIdx, err := switcher.Request(databaseName, ep_BEGIN_TX, http.MethodPost, query, body, 3, 3)
+	resp, nodeIdx, err := switcher.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3)
 	if err != nil {
 		return "", -1, err
 	}
@@ -85,6 +85,9 @@ func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, n
 }
 
 func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
+	headers := map[string]string{
+		HEADER_TX_ID: c.orgTxId,
+	}
 	body := map[string]any{
 		"sql":    sql,
 		"params": params,
@@ -95,9 +98,8 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 	if opts.TimeoutSec > 0 {
 		body["timeoutSec"] = opts.TimeoutSec
 	}
-	query := map[string]string{"_TxID": c.orgTxId}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_QUERY, http.MethodPost, query, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_QUERY, http.MethodPost, headers, body)
 	if err != nil {
 		return nil, err
 	}
@@ -111,13 +113,15 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 }
 
 func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
+	headers := map[string]string{
+		HEADER_TX_ID: c.orgTxId,
+	}
 	body := map[string]any{
 		"sql":    sql,
 		"params": params,
 	}
-	query := map[string]string{"_TxID": c.orgTxId}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_EXECUTE, http.MethodPost, query, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body)
 	if err != nil {
 		return nil, err
 	}
@@ -130,8 +134,10 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 }
 
 func (c *TxClient) Commit() error {
-	query := map[string]string{"_TxID": c.orgTxId}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_COMMIT_TX, http.MethodPut, query, nil)
+	headers := map[string]string{
+		HEADER_TX_ID: c.orgTxId,
+	}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil)
 	if err != nil {
 		return err
 	}
@@ -144,8 +150,10 @@ func (c *TxClient) Commit() error {
 }
 
 func (c *TxClient) Rollback() error {
-	query := map[string]string{"_TxID": c.orgTxId}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_ROLLBACK_TX, http.MethodPut, query, nil)
+	headers := map[string]string{
+		HEADER_TX_ID: c.orgTxId,
+	}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil)
 	if err != nil {
 		return err
 	}
@@ -158,8 +166,10 @@ func (c *TxClient) Rollback() error {
 }
 
 func (c *TxClient) Close() error {
-	query := map[string]string{"_TxID": c.orgTxId}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_DONE_TX, http.MethodPut, query, nil)
+	headers := map[string]string{
+		HEADER_TX_ID: c.orgTxId,
+	}
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil)
 	if err != nil {
 		return err
 	}

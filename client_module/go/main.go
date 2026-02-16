@@ -35,8 +35,16 @@ func main() {
 	var countOK, countError atomic.Int64
 	start := time.Now()
 	wg := sync.WaitGroup{}
-	for i := 0; i < count/100000; i++ {
-		for j := range 100000 {
+	batchSize := 100000
+	loopCount := count / batchSize
+	if count%batchSize != 0 {
+		loopCount++
+	}
+	for i := 0; i < loopCount; i++ {
+		for j := range batchSize {
+			if i*batchSize+j >= count {
+				break
+			}
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()

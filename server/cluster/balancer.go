@@ -75,8 +75,9 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// Weight抽選で、自分のScoreの方が高い場合は自分で処理
 		// それ以外はredirect、Max３回か、自分にリダイレクトされた場合は終了（Client側実装）
 		selfBestScore, selfRecommendDs := selectSelfDatasource(b.SelfNode, tarDbName, endpoint)
-		log.Printf("Self Best Score: %+v -> %+v", selfBestScore, selfRecommendDs)
+		log.Printf("###[Balancer] Self Best Score: %+v -> %+v", selfBestScore, selfRecommendDs)
 		if selfRecommendDs != nil {
+			log.Printf("###[Balancer] Serving on self node: %+v", selfRecommendDs.exIndex)
 			next.ServeHTTP(w, PutCtxDsIdx(r, selfRecommendDs.exIndex))
 			return
 		}
@@ -86,21 +87,23 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 				http.Error(w, fmt.Sprintf("No resource to process on this node. Node[%s], RedirectCount[%d]", b.SelfNode.NodeID, redirectCount), http.StatusServiceUnavailable)
 				return
 			}
+			log.Printf("###[Balancer] Forced Serving on self node: %+v", selfBestScore.exIndex)
 			next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
 			return
 		}
 
 		/*** 他のノード選択 ***/
 		recommendNodeScore, recommendNode := selectOtherNode(b.OtherNodes, tarDbName, endpoint)
-
+		log.Printf("###[Balancer] Recommend Node Score: %+v -> %+v", recommendNodeScore, recommendNode)
 		if recommendNode == nil {
 			// ゲート条件チェックは行わない
 			// DB枯渇しても、Httpバッファリングが可能な場合は処理を継続させる
 			if selfBestScore != nil {
+				log.Printf("###[Balancer] No recommend node, Serving on self node: %+v", selfBestScore.exIndex)
 				next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
 				return
 			}
-			log.Printf("No candidate nodes available, processing locally despite lack of capacity")
+			log.Printf("###[Balancer] No candidate nodes available, processing locally despite lack of capacity")
 			http.Error(w, "No candidate nodes available and no capacity to process locally", http.StatusServiceUnavailable)
 			return
 		}
@@ -108,6 +111,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// 自分のScoreの方が高い場合は自分で処理
 		if selfBestScore.score > recommendNodeScore.score {
 			// さらに他ノードBestScoreとの比較はやめる、一瞬他ノードに集中させてしまう恐れあり
+			log.Printf("###[Balancer] Self Best Score is higher than recommend node score, Serving on self node: %+v", selfBestScore.exIndex)
 			next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
 			return
 		}
@@ -115,7 +119,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		// 307 Temporary Redirect
 		w.Header().Set("Location", recommendNode.NodeID)
 		w.WriteHeader(http.StatusTemporaryRedirect)
-		fmt.Fprintf(w, "Redirecting to Node[%s] [%f -> %f]\n", recommendNode.NodeID, selfBestScore.score, recommendNodeScore.score)
+		log.Printf("###[Balancer] Redirecting to Node[%s]", recommendNode.NodeID)
 	}
 	return http.HandlerFunc(fn)
 }
@@ -123,7 +127,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *ScoreWithWeight, recommendScore *ScoreWithWeight) {
 
 	scores := selfNode.GetScore(tarDbName, endpoint)
-	log.Printf("#Self Node Scores: %+v", scores)
+	log.Printf("###[Balancer] Self Node Scores: %+v", scores)
 
 	// ノード選択（TopK + Weighted Random）
 	best, bestRandom := selectBestRandomScore(scores)
@@ -149,6 +153,7 @@ func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT
 		}
 		scores = append(scores, nodeScores...)
 	}
+	log.Printf("###[Balancer] Other Node Scores: %+v", scores)
 
 	// ノード選択
 	_, bestRandomScore := selectBestRandomScore(scores)
