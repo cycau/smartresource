@@ -52,13 +52,15 @@ const HEADER_SECRET_KEY = "X-Secret-Key"
 const HEADER_DB_NAME = "_Cy_DbName"
 const HEADER_TX_ID = "_Cy_TxID"
 const HEADER_REDIRECT_COUNT = "_Cy_RdCount"
+const UNLIMITED_REQUEST_TIMEOUT_SEC = 900
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
-	DefaultSecretKey string      `yaml:"defaultSecretKey"`
-	DefaultDatabase  string      `yaml:"defaultDatabase"`
-	ClusterNodes     []NodeEntry `yaml:"clusterNodes"`
-	MaxConcurrency   int         `yaml:"maxConcurrency"`
+	MaxConcurrency           int         `yaml:"maxConcurrency"`
+	DefaultSecretKey         string      `yaml:"defaultSecretKey"`
+	DefaultDatabase          string      `yaml:"defaultDatabase"`
+	DefaultRequestTimeoutSec int         `yaml:"defaultRequestTimeoutSec"`
+	ClusterNodes             []NodeEntry `yaml:"clusterNodes"`
 }
 
 // nodeHealth は /healz レスポンス（サーバーと互換）
@@ -84,8 +86,8 @@ type datasourceInfo struct {
 
 var DEFAULT_DATABASE = ""
 
-func Init(nodes []NodeEntry, maxConcurrency int) error {
-	defaultDatabase, err := switcher.Init(nodes, maxConcurrency)
+func Init(nodes []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) error {
+	defaultDatabase, err := switcher.Init(nodes, maxConcurrency, defaultRequestTimeoutSec)
 	DEFAULT_DATABASE = defaultDatabase
 	return err
 }
@@ -106,7 +108,7 @@ func InitWithConfig(configPath string) error {
 		}
 	}
 
-	defaultDatabase, err := switcher.Init(config.ClusterNodes, config.MaxConcurrency)
+	defaultDatabase, err := switcher.Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
 	if config.DefaultDatabase != "" {
 		DEFAULT_DATABASE = config.DefaultDatabase
 	} else {
@@ -167,7 +169,7 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 		body["timeoutSec"] = opts.TimeoutSec
 	}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, opts.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +192,7 @@ func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"params": params,
 	}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3)
+	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, UNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return nil, err
 	}

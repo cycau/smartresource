@@ -90,6 +90,15 @@ const (
 )
 
 func (ds *TxDatasource) releaseResource(resourceType ResourceType) {
+	switch resourceType {
+	case RESOURCE_TYPE_READ:
+		ds.semRead.Release(1)
+	case RESOURCE_TYPE_WRITE:
+		ds.semWrite.Release(1)
+	case RESOURCE_TYPE_TX:
+		ds.semWrite.Release(1)
+	}
+
 	ds.mu.Lock()
 	switch resourceType {
 	case RESOURCE_TYPE_READ:
@@ -100,15 +109,6 @@ func (ds *TxDatasource) releaseResource(resourceType ResourceType) {
 		ds.runningTx--
 	}
 	ds.mu.Unlock()
-
-	switch resourceType {
-	case RESOURCE_TYPE_READ:
-		ds.semRead.Release(1)
-	case RESOURCE_TYPE_WRITE:
-		ds.semWrite.Release(1)
-	case RESOURCE_TYPE_TX:
-		ds.semWrite.Release(1)
-	}
 }
 
 func (ds *TxDatasource) cleanupEntry(entry *TxEntry) {
@@ -220,16 +220,25 @@ func (dm *DsManager) allocateResource(ctx context.Context, datasourceIdx int, re
 	case RESOURCE_TYPE_READ:
 		err := ds.semRead.Acquire(ctx, 1)
 		if err != nil {
+			ds.mu.Lock()
+			ds.runningRead--
+			ds.mu.Unlock()
 			return nil, fmt.Errorf("failed to acquire read semaphore: %w", err)
 		}
 	case RESOURCE_TYPE_WRITE:
 		err := ds.semWrite.Acquire(ctx, 1)
 		if err != nil {
+			ds.mu.Lock()
+			ds.runningWrite--
+			ds.mu.Unlock()
 			return nil, fmt.Errorf("failed to acquire write semaphore: %w", err)
 		}
 	case RESOURCE_TYPE_TX:
 		err := ds.semWrite.Acquire(ctx, 1)
 		if err != nil {
+			ds.mu.Lock()
+			ds.runningTx--
+			ds.mu.Unlock()
 			return nil, fmt.Errorf("failed to acquire transaction semaphore: %w", err)
 		}
 	}
@@ -261,7 +270,6 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLeve
 
 	ds, err := dm.allocateResource(context.Background(), datasourceIdx, RESOURCE_TYPE_TX)
 	if err != nil {
-		ds.releaseResource(RESOURCE_TYPE_TX)
 		return nil, err
 	}
 
@@ -367,10 +375,9 @@ func (dm *DsManager) CloseTx(txID string) error {
 func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
 	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_READ)
 	if err != nil {
-		ds.releaseResource(RESOURCE_TYPE_READ)
 		return nil, nil, err
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(5 * time.Second) // for test
 
 	timeout := ds.DefaultQueryTimeout
 	if timeoutSec != nil {
@@ -418,7 +425,6 @@ func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, 
 func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
 	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_WRITE)
 	if err != nil {
-		ds.releaseResource(RESOURCE_TYPE_WRITE)
 		return nil, nil, err
 	}
 

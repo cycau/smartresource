@@ -26,14 +26,18 @@ type Switcher struct {
 var switcher = &Switcher{}
 var httpClient *http.Client
 
-func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabase string, err error) {
+func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
+	log.Println("###[Init] entries:", entries)
+	log.Println("###[Init] maxConcurrency:", maxConcurrency)
+	log.Println("###[Init] defaultRequestTimeoutSec:", defaultRequestTimeoutSec)
+
 	count := len(entries)
 	if count == 0 {
 		return "", fmt.Errorf("No cluster nodes configured.")
 	}
 
 	httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: time.Duration(defaultRequestTimeoutSec) * time.Second, // サーバー側の query が 15s 超になることがあるため余裕を持たせる
 		Transport: &http.Transport{
 			MaxIdleConns:        maxConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
 			MaxIdleConnsPerHost: maxConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
@@ -86,14 +90,15 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int) (defaultDatabas
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
-func (s *Switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int) (*http.Response, int, error) {
+// RequestTimeout は 0 のときクライアント共通タイムアウトのみ。>0 のときこのリクエスト専用のタイムアウトを指定（先に切れた方が有効）。
+func (s *Switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int, timoutSec int) (*http.Response, int, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
 		return nil, -1, err
 	}
 	node := &s.candidates[nodeIdx]
 
-	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount)
+	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount, timoutSec)
 	if resp == nil {
 		return nil, nodeIdx, err
 	}
@@ -131,17 +136,17 @@ func (s *Switcher) Request(dbName string, endpoint endpointType, method string, 
 	}
 
 	// retry
-	return s.Request(dbName, endpoint, method, headers, body, redirectCount, retryCount)
+	return s.Request(dbName, endpoint, method, headers, body, redirectCount, retryCount, timoutSec)
 }
 
-func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any) (*http.Response, error) {
+func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*http.Response, error) {
 	node := &s.candidates[nodeIdx]
 
-	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0)
+	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0, timoutSec)
 	return resp, err
 }
 
-func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int) (*http.Response, int, error) {
+func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int, timoutSec int) (*http.Response, int, error) {
 	// redirect多発する場合は並列数調整役割も兼ねる
 	if err := s.sem.Acquire(context.Background(), 1); err != nil {
 		return nil, nodeIdx, err
@@ -149,7 +154,15 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	defer s.sem.Release(1)
 
 	u := baseURL + "/rdb" + getEndpointPath(endpoint)
-	req, err := http.NewRequest(method, u, nil)
+	var req *http.Request
+	var err error
+	if timoutSec > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timoutSec+1)*time.Second)
+		defer cancel()
+		req, err = http.NewRequestWithContext(ctx, method, u, nil)
+	} else {
+		req, err = http.NewRequest(method, u, nil)
+	}
 	if err != nil {
 		return nil, nodeIdx, err
 	}
@@ -202,7 +215,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		redirectNode := &s.candidates[i]
 		if redirectNode.NodeID == redirectNodeId {
 			//log.Printf("Redirect to node %s, RedirectCount: %d", redirectNode.NodeID, redirectCount)
-			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, headers, body, redirectCount)
+			return s.requestHttp(i, redirectNode.BaseURL, redirectNode.SecretKey, endpoint, method, headers, body, redirectCount, timoutSec)
 		}
 	}
 

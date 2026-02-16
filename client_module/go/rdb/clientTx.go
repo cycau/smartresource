@@ -67,7 +67,7 @@ func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, n
 		HEADER_DB_NAME: databaseName,
 	}
 	body := map[string]any{"isolationLevel": isolationLevel}
-	resp, nodeIdx, err := switcher.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3)
+	resp, nodeIdx, err := switcher.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3, 0)
 	if err != nil {
 		return "", -1, err
 	}
@@ -99,7 +99,7 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 		body["timeoutSec"] = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_QUERY, http.MethodPost, headers, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_QUERY, http.MethodPost, headers, body, opts.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 		"params": params,
 	}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body, UNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (c *TxClient) Commit() error {
 	headers := map[string]string{
 		HEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}
@@ -153,7 +153,7 @@ func (c *TxClient) Rollback() error {
 	headers := map[string]string{
 		HEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func (c *TxClient) Close() error {
 	headers := map[string]string{
 		HEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}

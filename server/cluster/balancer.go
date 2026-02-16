@@ -127,7 +127,11 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *ScoreWithWeight, recommendScore *ScoreWithWeight) {
 
 	scores := selfNode.GetScore(tarDbName, endpoint)
-	log.Printf("###[Balancer] Self Node Scores: %+v", scores)
+	for i, s := range scores {
+		if s != nil {
+			log.Printf("###[Balancer] Self Node Score[%d]: %+v", i, *s)
+		}
+	}
 
 	// ノード選択（TopK + Weighted Random）
 	best, bestRandom := selectBestRandomScore(scores)
@@ -153,7 +157,11 @@ func selectOtherNode(otherNodes []*NodeInfo, tarDbName string, endpoint ENDPOINT
 		}
 		scores = append(scores, nodeScores...)
 	}
-	log.Printf("###[Balancer] Other Node Scores: %+v", scores)
+	for i, s := range scores {
+		if s != nil {
+			log.Printf("###[Balancer] Other Node Score[%d]: %+v", i, *s)
+		}
+	}
 
 	// ノード選択
 	_, bestRandomScore := selectBestRandomScore(scores)
