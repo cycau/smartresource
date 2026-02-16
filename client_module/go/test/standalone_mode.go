@@ -62,7 +62,7 @@ func Test1() error {
 		},
 		smartclient.QueryOptions{
 			LimitRows:  100,
-			TimeoutSec: 15,
+			TimeoutSec: 180,
 		},
 	)
 	if err != nil {

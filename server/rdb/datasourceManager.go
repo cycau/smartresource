@@ -157,7 +157,7 @@ type ReleaseResourceFunc func()
  ************************************************************/
 type DsManager struct {
 	dss               []*TxDatasource
-	txIDGen           *TxIDGenerator
+	txIDGen           *global.TxIDGenerator
 	stopCleanupTicker chan struct{}
 	wg                sync.WaitGroup
 }
@@ -188,7 +188,7 @@ func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 	}
 	dm := &DsManager{
 		dss:               dss,
-		txIDGen:           NewTxIDGenerator(),
+		txIDGen:           global.NewTxIDGenerator(),
 		stopCleanupTicker: make(chan struct{}),
 	}
 
@@ -305,7 +305,7 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLeve
 
 // Get retrieves a transaction entry and touches it
 func (dm *DsManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *TxDatasource, err error) {
-	dsIdx, err := dm.txIDGen.GetDatasourceIndex(txID)
+	dsIdx, err := global.GetDsIdxFromTxID(txID)
 	if err != nil {
 		return nil, nil, err
 	}

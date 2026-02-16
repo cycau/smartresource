@@ -1,14 +1,17 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"smartdatastream/server/global"
 	. "smartdatastream/server/global"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Balancer struct {
@@ -65,7 +68,12 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 
 		// トランザクション処理は常に受け入れる（優先処理）
 		if txID != "" {
-			next.ServeHTTP(w, r)
+			dsIdx, err := global.GetDsIdxFromTxID(txID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			b.runHandler(next, w, r, dsIdx)
 			return
 		}
 
@@ -78,7 +86,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		log.Printf("###[Balancer] Self Best Score: %+v -> %+v", selfBestScore, selfRecommendDs)
 		if selfRecommendDs != nil {
 			log.Printf("###[Balancer] Serving on self node: %+v", selfRecommendDs.exIndex)
-			next.ServeHTTP(w, PutCtxDsIdx(r, selfRecommendDs.exIndex))
+			b.runHandler(next, w, r, selfRecommendDs.exIndex)
 			return
 		}
 		// Client側で、最後のリダイレクトの場合（リダイレクトを受け付けない場合）
@@ -88,7 +96,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 				return
 			}
 			log.Printf("###[Balancer] Forced Serving on self node: %+v", selfBestScore.exIndex)
-			next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
+			b.runHandler(next, w, r, selfBestScore.exIndex)
 			return
 		}
 
@@ -100,7 +108,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			// DB枯渇しても、Httpバッファリングが可能な場合は処理を継続させる
 			if selfBestScore != nil {
 				log.Printf("###[Balancer] No recommend node, Serving on self node: %+v", selfBestScore.exIndex)
-				next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
+				b.runHandler(next, w, r, selfBestScore.exIndex)
 				return
 			}
 			log.Printf("###[Balancer] No candidate nodes available, processing locally despite lack of capacity")
@@ -112,7 +120,7 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		if selfBestScore.score > recommendNodeScore.score {
 			// さらに他ノードBestScoreとの比較はやめる、一瞬他ノードに集中させてしまう恐れあり
 			log.Printf("###[Balancer] Self Best Score is higher than recommend node score, Serving on self node: %+v", selfBestScore.exIndex)
-			next.ServeHTTP(w, PutCtxDsIdx(r, selfBestScore.exIndex))
+			b.runHandler(next, w, r, selfBestScore.exIndex)
 			return
 		}
 
@@ -122,6 +130,29 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 		log.Printf("###[Balancer] Redirecting to Node[%s]", recommendNode.NodeID)
 	}
 	return http.HandlerFunc(fn)
+}
+
+func (b *Balancer) runHandler(next http.Handler, w http.ResponseWriter, r *http.Request, dsIdx int) {
+
+	timeoutSecInt := b.SelfNode.Datasources[dsIdx].DefaultQueryTimeoutSec
+
+	timeoutSec := r.Header.Get(HEADER_TIMEOUT_SEC)
+	if timeoutSec != "" {
+		timeoutSecHeader, err := strconv.Atoi(timeoutSec)
+		if err == nil {
+			if timeoutSecHeader > 0 {
+				timeoutSecInt = timeoutSecHeader
+			}
+		}
+	}
+	deadline := time.Now().Add(time.Duration(timeoutSecInt) * time.Second)
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(deadline); err != nil {
+		log.Printf("SetWriteDeadline: %v", err)
+	}
+	r = r.WithContext(context.WithValue(r.Context(), CTX_DS_IDX, dsIdx))
+
+	next.ServeHTTP(w, r)
 }
 
 func selectSelfDatasource(selfNode *NodeInfo, tarDbName string, endpoint ENDPOINT_TYPE) (bestScore *ScoreWithWeight, recommendScore *ScoreWithWeight) {

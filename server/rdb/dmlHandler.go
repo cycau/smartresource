@@ -146,7 +146,7 @@ func (dh *DmlHandler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	if err := dh.responseQueryResult(w, rows, *req.LimitRows, startTime); err != nil {
+	if err := dh.responseQueryResult(w, rows, req.LimitRows, startTime); err != nil {
 		writeError(w, http.StatusInternalServerError, "QUERY_ERROR", fmt.Sprintf("Failed to read result rows: %v", err))
 		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 		return
@@ -185,7 +185,7 @@ func (dh *DmlHandler) QueryTx(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	if err := dh.responseQueryResult(w, rows, *req.LimitRows, startTime); err != nil {
+	if err := dh.responseQueryResult(w, rows, req.LimitRows, startTime); err != nil {
 		writeError(w, http.StatusInternalServerError, "QUERY_ERROR", fmt.Sprintf("Failed to read result rows: %v", err))
 		dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), true, false)
 		return
@@ -194,7 +194,7 @@ func (dh *DmlHandler) QueryTx(w http.ResponseWriter, r *http.Request) {
 	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
 }
 
-func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows, limit int, startTime time.Time) error {
+func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows, limitRows *int, startTime time.Time) error {
 
 	// Get column information
 	columns, err := rows.Columns()
@@ -218,8 +218,9 @@ func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows,
 		}
 	}
 
-	if limit < 1 {
-		limit = math.MaxInt32
+	limit := math.MaxInt32
+	if limitRows != nil && *limitRows > 0 {
+		limit = *limitRows
 	}
 
 	// Read rows
@@ -437,6 +438,7 @@ func (dh *DmlHandler) StatsGet(datasourceIdx int) (latencyP95Ms int, errorRate1m
 /************************************************************
  * Private methods
  ************************************************************/
+
 func (dh *DmlHandler) parseRequest(r *http.Request) (request ExecuteRequest, params []any, err error) {
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

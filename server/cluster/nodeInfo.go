@@ -34,12 +34,13 @@ type NodeInfo struct {
 }
 
 type DatasourceInfo struct {
-	DatasourceID  string `json:"datasourceId"`
-	DatabaseName  string `json:"databaseName"`
-	Active        bool   `json:"active"`
-	MaxOpenConns  int    `json:"maxOpenConns"`
-	MaxWriteConns int    `json:"maxWriteConns"`
-	MinWriteConns int    `json:"minWriteConns"`
+	DatasourceID           string `json:"datasourceId"`
+	DatabaseName           string `json:"databaseName"`
+	Active                 bool   `json:"active"`
+	MaxOpenConns           int    `json:"maxOpenConns"`
+	MaxWriteConns          int    `json:"maxWriteConns"`
+	MinWriteConns          int    `json:"minWriteConns"`
+	DefaultQueryTimeoutSec int    `json:"-"`
 
 	RunningRead   int     `json:"runningRead"`
 	RunningWrite  int     `json:"runningWrite"`
@@ -57,12 +58,13 @@ const STAT_WINDOW_INTERVAL = 5 * time.Minute
 func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 
 	return &DatasourceInfo{
-		DatasourceID:  config.DatasourceID,
-		DatabaseName:  config.DatabaseName,
-		Active:        true,
-		MaxOpenConns:  config.MaxOpenConns,
-		MaxWriteConns: config.MaxWriteConns,
-		MinWriteConns: config.MinWriteConns,
+		DatasourceID:           config.DatasourceID,
+		DatabaseName:           config.DatabaseName,
+		Active:                 true,
+		MaxOpenConns:           config.MaxOpenConns,
+		MaxWriteConns:          config.MaxWriteConns,
+		MinWriteConns:          config.MinWriteConns,
+		DefaultQueryTimeoutSec: config.DefaultQueryTimeoutSec,
 
 		RunningRead:   0,
 		RunningWrite:  0,
