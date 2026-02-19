@@ -1,8 +1,14 @@
 package smartclient
 
 import (
+	"fmt"
 	"time"
 )
+
+type NodeEntry struct {
+	BaseURL   string `yaml:"baseUrl"`
+	SecretKey string `yaml:"secretKey"`
+}
 
 type ValueType string
 
@@ -20,7 +26,7 @@ const (
 )
 
 // ParamValue はクエリ/実行のパラメータ
-type ParamValue struct {
+type paramValue struct {
 	Value any       `json:"value,omitempty"`
 	Type  ValueType `json:"type"`
 }
@@ -39,9 +45,9 @@ type ColumnMeta struct {
 }
 
 // QueryResult は Query の結果
-type QueryResult struct {
+type queryResult struct {
 	Meta          []ColumnMeta `json:"meta,omitempty"`
-	Rows          []any        `json:"rows"`
+	Rows          [][]any      `json:"rows"`
 	TotalCount    int          `json:"totalCount"`
 	ElapsedTimeMs int64        `json:"elapsedTimeMs"`
 }
@@ -52,7 +58,7 @@ type ExecuteResult struct {
 	ElapsedTimeMs int64 `json:"elapsedTimeMs"`
 }
 
-type BeginTxResponse struct {
+type TxInfo struct {
 	TxId      string    `json:"txId"`
 	NodeID    string    `json:"nodeId"`
 	ExpiresAt time.Time `json:"expiresAt"`
@@ -68,7 +74,30 @@ const (
 	Isolation_Serializable    IsolationLevel = "SERIALIZABLE"
 )
 
-type NodeEntry struct {
-	BaseURL   string `yaml:"baseUrl"`
-	SecretKey string `yaml:"secretKey"`
+type Record struct {
+	meta *map[string]int
+	data *[]any
+}
+
+func (r *Record) Get(columnName string) any {
+	idx, ok := (*r.meta)[columnName]
+	if !ok {
+		panic(fmt.Sprintf("Column name %s not exist", columnName))
+	}
+	return (*r.data)[idx]
+}
+
+type Records struct {
+	Meta          []ColumnMeta
+	Rows          []Record
+	colMap        map[string]int
+	TotalCount    int
+	ElapsedTimeMs int64
+}
+
+func (r *Records) Get(rowIndex int) *Record {
+	if rowIndex < 0 || rowIndex >= len(r.Rows) {
+		panic(fmt.Sprintf("Row index %d out of range", rowIndex))
+	}
+	return &r.Rows[rowIndex]
 }

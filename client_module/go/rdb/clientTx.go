@@ -14,14 +14,14 @@ import (
 **************************************************/
 type TxClient struct {
 	dbName   string
-	executor *Switcher
+	executor *smartSwitcher
 	nodeIdx  int
 	orgTxId  string
 }
 
 func NewTx(databaseName string, isolationLevel IsolationLevel) (*TxClient, error) {
 	if databaseName == "" {
-		databaseName = DEFAULT_DATABASE
+		databaseName = dEFAULT_DATABASE
 	}
 	txId, nodeIdx, err := beginTx(databaseName, isolationLevel)
 	if err != nil {
@@ -64,33 +64,37 @@ func (c *TxClient) GetTxId() string {
 
 func beginTx(databaseName string, isolationLevel IsolationLevel) (txId string, nodeIdx int, err error) {
 	headers := map[string]string{
-		HEADER_DB_NAME: databaseName,
+		hEADER_DB_NAME: databaseName,
 	}
 	body := map[string]any{"isolationLevel": isolationLevel}
-	resp, nodeIdx, err := switcher.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3, 0)
+	resp, err := switcher.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3, 0)
 	if err != nil {
 		return "", -1, err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", -1, fmt.Errorf("begin tx status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
-	var result BeginTxResponse
+	var result TxInfo
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", -1, err
 	}
 
-	return result.TxId, nodeIdx, nil
+	return result.TxId, resp.NodeIdx, nil
 }
 
-func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
+func (c *TxClient) Query(sql string, params *Params, opts QueryOptions) (*Records, error) {
 	headers := map[string]string{
-		HEADER_TX_ID: c.orgTxId,
+		hEADER_TX_ID: c.orgTxId,
+	}
+	paramValues := []paramValue{}
+	if params != nil {
+		paramValues = params.data
 	}
 	body := map[string]any{
 		"sql":    sql,
-		"params": params,
+		"params": paramValues,
 	}
 	if opts.LimitRows > 0 {
 		body["limitRows"] = opts.LimitRows
@@ -103,29 +107,33 @@ func (c *TxClient) Query(sql string, params Params, opts QueryOptions) (*QueryRe
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	var result QueryResult
+	defer resp.Release()
+	var result queryResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	return &result, nil
+	return convertResult(result), nil
 }
 
-func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
+func (c *TxClient) Execute(sql string, params *Params) (*ExecuteResult, error) {
 	headers := map[string]string{
-		HEADER_TX_ID: c.orgTxId,
+		hEADER_TX_ID: c.orgTxId,
+	}
+	paramValues := []paramValue{}
+	if params != nil {
+		paramValues = params.data
 	}
 	body := map[string]any{
 		"sql":    sql,
-		"params": params,
+		"params": paramValues,
 	}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body, UNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body, uNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	var result ExecuteResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
@@ -135,13 +143,13 @@ func (c *TxClient) Execute(sql string, params Params) (*ExecuteResult, error) {
 
 func (c *TxClient) Commit() error {
 	headers := map[string]string{
-		HEADER_TX_ID: c.orgTxId,
+		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil, uNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("commit tx status %d: %s", resp.StatusCode, string(bodyBytes))
@@ -151,13 +159,13 @@ func (c *TxClient) Commit() error {
 
 func (c *TxClient) Rollback() error {
 	headers := map[string]string{
-		HEADER_TX_ID: c.orgTxId,
+		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil, uNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("rollback tx status %d: %s", resp.StatusCode, string(bodyBytes))
@@ -167,13 +175,13 @@ func (c *TxClient) Rollback() error {
 
 func (c *TxClient) Close() error {
 	headers := map[string]string{
-		HEADER_TX_ID: c.orgTxId,
+		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil, UNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil, uNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("close tx status %d: %s", resp.StatusCode, string(bodyBytes))

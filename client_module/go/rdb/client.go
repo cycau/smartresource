@@ -48,11 +48,11 @@ func getEndpointPath(ep endpointType) string {
 	}
 }
 
-const HEADER_SECRET_KEY = "X-Secret-Key"
-const HEADER_DB_NAME = "_Cy_DbName"
-const HEADER_TX_ID = "_Cy_TxID"
-const HEADER_REDIRECT_COUNT = "_Cy_RdCount"
-const UNLIMITED_REQUEST_TIMEOUT_SEC = 900
+const hEADER_SECRET_KEY = "X-Secret-Key"
+const hEADER_DB_NAME = "_Cy_DbName"
+const hEADER_TX_ID = "_Cy_TxID"
+const hEADER_REDIRECT_COUNT = "_Cy_RdCount"
+const uNLIMITED_REQUEST_TIMEOUT_SEC = 900
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
@@ -84,11 +84,11 @@ type datasourceInfo struct {
 	MinWriteConns int    `json:"minWriteConns"`
 }
 
-var DEFAULT_DATABASE = ""
+var dEFAULT_DATABASE = ""
 
 func Init(nodes []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) error {
 	defaultDatabase, err := switcher.Init(nodes, maxConcurrency, defaultRequestTimeoutSec)
-	DEFAULT_DATABASE = defaultDatabase
+	dEFAULT_DATABASE = defaultDatabase
 	return err
 }
 
@@ -110,9 +110,9 @@ func InitWithConfig(configPath string) error {
 
 	defaultDatabase, err := switcher.Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
 	if config.DefaultDatabase != "" {
-		DEFAULT_DATABASE = config.DefaultDatabase
+		dEFAULT_DATABASE = config.DefaultDatabase
 	} else {
-		DEFAULT_DATABASE = defaultDatabase
+		dEFAULT_DATABASE = defaultDatabase
 	}
 	return err
 }
@@ -123,13 +123,13 @@ func InitWithConfig(configPath string) error {
 
 type Client struct {
 	dbName   string
-	executor *Switcher
+	executor *smartSwitcher
 }
 
 // Get は databaseName 用のクライアントを返す。空の場合は defaultDatabase を使用する
 func Get(databaseName string) *Client {
 	if databaseName == "" {
-		databaseName = DEFAULT_DATABASE
+		databaseName = dEFAULT_DATABASE
 	}
 	return &Client{
 		dbName:   databaseName,
@@ -137,30 +137,44 @@ func Get(databaseName string) *Client {
 	}
 }
 
-func ParamVal(val any, valType ValueType) ParamValue {
+type Params struct {
+	data []paramValue
+}
+
+func (p *Params) Add(val any, valType ValueType) *Params {
 	if val == nil {
-		return ParamValue{
+		p.data = append(p.data, paramValue{
 			Value: nil,
 			Type:  ValueType_NULL,
-		}
+		})
+		return p
 	}
 
-	return ParamValue{
+	p.data = append(p.data, paramValue{
 		Value: val,
 		Type:  valType,
+	})
+	return p
+}
+
+func NewParams() *Params {
+	return &Params{
+		data: []paramValue{},
 	}
 }
 
-type Params []ParamValue
-
-func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResult, error) {
+func (c *Client) Query(sql string, params *Params, opts QueryOptions) (*Records, error) {
 
 	headers := map[string]string{
-		HEADER_DB_NAME: c.dbName,
+		hEADER_DB_NAME: c.dbName,
+	}
+	paramValues := []paramValue{}
+	if params != nil {
+		paramValues = params.data
 	}
 	body := map[string]any{
 		"sql":    sql,
-		"params": params,
+		"params": paramValues,
 	}
 	if opts.LimitRows > 0 {
 		body["limitRows"] = opts.LimitRows
@@ -169,37 +183,58 @@ func (c *Client) Query(sql string, params Params, opts QueryOptions) (*QueryResu
 		body["timeoutSec"] = opts.TimeoutSec
 	}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, opts.TimeoutSec)
+	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, opts.TimeoutSec)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	var result QueryResult
+	defer resp.Release()
+	var result queryResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	return &result, nil
+	return convertResult(result), nil
 }
 
-func (c *Client) Execute(sql string, params Params) (*ExecuteResult, error) {
+func (c *Client) Execute(sql string, params *Params) (*ExecuteResult, error) {
 
 	headers := map[string]string{
-		HEADER_DB_NAME: c.dbName,
+		hEADER_DB_NAME: c.dbName,
+	}
+	paramValues := []paramValue{}
+	if params != nil {
+		paramValues = params.data
 	}
 	body := map[string]any{
 		"sql":    sql,
-		"params": params,
+		"params": paramValues,
 	}
 
-	resp, _, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, UNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, uNLIMITED_REQUEST_TIMEOUT_SEC)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer resp.Release()
 	var result ExecuteResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+func convertResult(result queryResult) *Records {
+	records := Records{
+		colMap:        make(map[string]int),
+		Rows:          make([]Record, len(result.Rows)),
+		TotalCount:    result.TotalCount,
+		ElapsedTimeMs: result.ElapsedTimeMs,
+	}
+	for i, col := range result.Meta {
+		records.colMap[col.Name] = i
+	}
+	for i := range records.Rows {
+		records.Rows[i].meta = &records.colMap
+		records.Rows[i].data = &result.Rows[i]
+	}
+	return &records
 }

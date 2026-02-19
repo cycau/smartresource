@@ -35,7 +35,7 @@ func main() {
 	var countOK, countError atomic.Int64
 	start := time.Now()
 	wg := sync.WaitGroup{}
-	batchSize := 100000
+	batchSize := 10000
 	loopCount := count / batchSize
 	if count%batchSize != 0 {
 		loopCount++
@@ -48,11 +48,14 @@ func main() {
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()
-				err := test.Test1()
+				result, err := test.Test1()
 				if err != nil {
 					log.Printf("Test error: %v", err)
 					countError.Add(1)
 				} else {
+					if j == 0 {
+						log.Printf("Test result: %+v", result)
+					}
 					countOK.Add(1)
 				}
 			}(j)

@@ -17,16 +17,16 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-type Switcher struct {
+type smartSwitcher struct {
 	candidates []nodeInfo
 	httpClient *http.Client
 	sem        *semaphore.Weighted
 }
 
-var switcher = &Switcher{}
+var switcher = &smartSwitcher{}
 var httpClient *http.Client
 
-func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
+func (s *smartSwitcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
 	log.Println("###[Init] entries:", entries)
 	log.Println("###[Init] maxConcurrency:", maxConcurrency)
 	log.Println("###[Init] defaultRequestTimeoutSec:", defaultRequestTimeoutSec)
@@ -91,20 +91,20 @@ func (s *Switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestT
 }
 
 // RequestTimeout は 0 のときクライアント共通タイムアウトのみ。>0 のときこのリクエスト専用のタイムアウトを指定（先に切れた方が有効）。
-func (s *Switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int, timoutSec int) (*http.Response, int, error) {
+func (s *smartSwitcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int, timoutSec int) (*smartResponse, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
-		return nil, -1, err
+		return nil, err
 	}
 	node := &s.candidates[nodeIdx]
 
-	resp, nodeIdx, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount, timoutSec)
+	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount, timoutSec)
 	if resp == nil {
-		return nil, nodeIdx, err
+		return nil, err
 	}
 	// OK response
 	if err == nil {
-		return resp, nodeIdx, nil
+		return resp, nil
 	}
 
 	// retry only when network error or connection timeout or capacity error
@@ -114,7 +114,7 @@ func (s *Switcher) Request(dbName string, endpoint endpointType, method string, 
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, nodeIdx, fmt.Errorf("Request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("Request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 	resp.Body.Close()
 
@@ -132,43 +132,49 @@ func (s *Switcher) Request(dbName string, endpoint endpointType, method string, 
 
 	retryCount--
 	if retryCount < 0 {
-		return nil, nodeIdx, fmt.Errorf("Failed to connect to service. Retry count exceeded. Last status: %d error: %v", resp.StatusCode, err)
+		return nil, fmt.Errorf("Failed to connect to service. Retry count exceeded. Last status: %d error: %v", resp.StatusCode, err)
 	}
 
 	// retry
 	return s.Request(dbName, endpoint, method, headers, body, redirectCount, retryCount, timoutSec)
 }
 
-func (s *Switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*http.Response, error) {
+func (s *smartSwitcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*smartResponse, error) {
 	node := &s.candidates[nodeIdx]
 
-	resp, _, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0, timoutSec)
-	return resp, err
+	return s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0, timoutSec)
 }
 
-func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int, timoutSec int) (*http.Response, int, error) {
+type smartResponse struct {
+	http.Response
+	NodeIdx int
+	Release func()
+}
+
+func (s *smartSwitcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int, timoutSec int) (*smartResponse, error) {
 	// redirect多発する場合は並列数調整役割も兼ねる
 	if err := s.sem.Acquire(context.Background(), 1); err != nil {
-		return nil, nodeIdx, err
+		return nil, err
 	}
 	defer s.sem.Release(1)
 
 	u := baseURL + "/rdb" + getEndpointPath(endpoint)
+	var ctxCancel context.CancelFunc
 	var req *http.Request
 	var err error
 	if timoutSec > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timoutSec+1)*time.Second)
-		defer cancel()
+		ctxCancel = cancel
 		req, err = http.NewRequestWithContext(ctx, method, u, nil)
 	} else {
 		req, err = http.NewRequest(method, u, nil)
 	}
 	if err != nil {
-		return nil, nodeIdx, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set(HEADER_SECRET_KEY, secretKey)
-	req.Header.Set(HEADER_REDIRECT_COUNT, strconv.Itoa(redirectCount))
+	req.Header.Set(hEADER_SECRET_KEY, secretKey)
+	req.Header.Set(hEADER_REDIRECT_COUNT, strconv.Itoa(redirectCount))
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -176,7 +182,7 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	if body != nil {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, nodeIdx, err
+			return nil, err
 		}
 		req.Body = io.NopCloser(&buf)
 		req.ContentLength = int64(buf.Len())
@@ -184,16 +190,38 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("Request failed with Error: %v", err)
-		return nil, nodeIdx, err
+		if resp != nil && resp.Body != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+		if ctxCancel != nil {
+			ctxCancel()
+		}
+		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		return resp, nodeIdx, nil
+		sResponse := &smartResponse{
+			Response: *resp,
+			NodeIdx:  nodeIdx,
+			Release: func() {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if ctxCancel != nil {
+					ctxCancel()
+				}
+			},
+		}
+		return sResponse, nil
 	}
 
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if ctxCancel != nil {
+		ctxCancel()
+	}
 	if resp.StatusCode != http.StatusTemporaryRedirect {
-		return nil, nodeIdx, fmt.Errorf("query status %d", resp.StatusCode)
+		return nil, fmt.Errorf("query status %d", resp.StatusCode)
 	}
 
 	redirectCount--
@@ -203,12 +231,12 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 	} else if redirectCount == 0 {
 		time.Sleep(500 * time.Millisecond)
 	} else if redirectCount < 0 {
-		return nil, nodeIdx, fmt.Errorf("Redirect count exceeded.")
+		return nil, fmt.Errorf("Redirect count exceeded.")
 	}
 
 	redirectNodeId := resp.Header.Get("Location")
 	if redirectNodeId == "" {
-		return nil, nodeIdx, fmt.Errorf("Redirect location is empty.")
+		return nil, fmt.Errorf("Redirect location is empty.")
 	}
 
 	for i := range s.candidates {
@@ -219,12 +247,12 @@ func (s *Switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 		}
 	}
 
-	return nil, nodeIdx, fmt.Errorf("Redirect node id not found. Node[%s]", redirectNodeId)
+	return nil, fmt.Errorf("Redirect node id not found. Node[%s]", redirectNodeId)
 }
 
-const PROBLEMATIC_NODE_CHECK_INTERVAL = 15 * time.Second
+const pROBLEMATIC_NODE_CHECK_INTERVAL = 15 * time.Second
 
-func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, err error) {
+func (s *smartSwitcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, err error) {
 	nodeIdx, dsIdx, problematicNodes, err := s.selectRandomNode(dbName, endpoint)
 
 	if err != nil {
@@ -233,7 +261,7 @@ func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int
 		for _, i := range problematicNodes {
 			n := &s.candidates[i]
 			n.Mu.Lock()
-			if time.Since(n.CheckTime) < PROBLEMATIC_NODE_CHECK_INTERVAL {
+			if time.Since(n.CheckTime) < pROBLEMATIC_NODE_CHECK_INTERVAL {
 				n.Mu.Unlock()
 				continue
 			}
@@ -266,7 +294,7 @@ func (s *Switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int
 	for _, i := range problematicNodes {
 		n := &s.candidates[i]
 		n.Mu.Lock()
-		if time.Since(n.CheckTime) < PROBLEMATIC_NODE_CHECK_INTERVAL {
+		if time.Since(n.CheckTime) < pROBLEMATIC_NODE_CHECK_INTERVAL {
 			n.Mu.Unlock()
 			continue
 		}
@@ -297,7 +325,7 @@ type dsCandidate struct {
 	weight  float64
 }
 
-func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
+func (s *smartSwitcher) selectRandomNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
 	if len(s.candidates) == 0 {
 		return -1, -1, nil, fmt.Errorf("Node Candidates are not initialized yet.")
 	}
@@ -310,7 +338,7 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeI
 		n.Mu.RLock()
 
 		if n.Status != "SERVING" {
-			if time.Since(n.CheckTime) > PROBLEMATIC_NODE_CHECK_INTERVAL {
+			if time.Since(n.CheckTime) > pROBLEMATIC_NODE_CHECK_INTERVAL {
 				nodeIndexes = append(nodeIndexes, i)
 			}
 			n.Mu.RUnlock()
@@ -349,7 +377,7 @@ func (s *Switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeI
 		}
 		n.Mu.RUnlock()
 
-		if problematic && time.Since(n.CheckTime) > PROBLEMATIC_NODE_CHECK_INTERVAL {
+		if problematic && time.Since(n.CheckTime) > pROBLEMATIC_NODE_CHECK_INTERVAL {
 			nodeIndexes = append(nodeIndexes, i)
 		}
 	}
