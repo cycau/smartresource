@@ -233,7 +233,7 @@ func convertResult(result queryResult) *Records {
 		records.colMap[col.Name] = i
 	}
 	for i := range records.Rows {
-		records.Rows[i].meta = &records.colMap
+		records.Rows[i].colMap = &records.colMap
 		records.Rows[i].data = &result.Rows[i]
 	}
 	return &records
