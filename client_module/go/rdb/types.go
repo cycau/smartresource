@@ -75,12 +75,12 @@ const (
 )
 
 type Record struct {
-	meta *map[string]int
-	data *[]any
+	colMap *map[string]int
+	data   *[]any
 }
 
 func (r *Record) Get(columnName string) any {
-	idx, ok := (*r.meta)[columnName]
+	idx, ok := (*r.colMap)[columnName]
 	if !ok {
 		panic(fmt.Sprintf("Column name %s not exist", columnName))
 	}
@@ -88,9 +88,9 @@ func (r *Record) Get(columnName string) any {
 }
 
 type Records struct {
+	colMap        map[string]int
 	Meta          []ColumnMeta
 	Rows          []Record
-	colMap        map[string]int
 	TotalCount    int
 	ElapsedTimeMs int64
 }
@@ -100,4 +100,8 @@ func (r *Records) Get(rowIndex int) *Record {
 		panic(fmt.Sprintf("Row index %d out of range", rowIndex))
 	}
 	return &r.Rows[rowIndex]
+}
+
+func (r *Records) Size() int {
+	return len(r.Rows)
 }
