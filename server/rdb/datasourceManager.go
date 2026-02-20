@@ -176,7 +176,7 @@ func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 			Datasource:       *ds,
 			MaxTxIdleTimeout: time.Duration(config.MaxTxIdleTimeoutSec) * time.Second,
 
-			semRead:  semaphore.NewWeighted(int64(config.MaxOpenConns - config.MinWriteConns)),
+			semRead:  semaphore.NewWeighted(int64(config.PoolConns - config.MinWriteConns)),
 			semWrite: semaphore.NewWeighted(int64(config.MaxWriteConns)),
 			entries:  make(map[string]*TxEntry),
 
@@ -262,7 +262,7 @@ func (dm *DsManager) StatsGet(datasourceIdx int) (runningRead int, runningWrite 
 }
 
 // Begin starts a new transaction
-func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLevel, timeoutSec *int) (*TxEntry, error) {
+func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel *sql.IsolationLevel, maxTxTimeoutSec *int) (*TxEntry, error) {
 	txID, err := dm.txIDGen.Generate(datasourceIdx)
 	if err != nil {
 		return nil, err
@@ -281,8 +281,8 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel sql.IsolationLeve
 
 	idleTimeout := &ds.MaxTxIdleTimeout
 	expiresAt := time.Now().Add(ds.MaxTxIdleTimeout)
-	if timeoutSec != nil {
-		expiresAt = time.Now().Add(time.Duration(*timeoutSec) * time.Second)
+	if maxTxTimeoutSec != nil && *maxTxTimeoutSec > 0 {
+		expiresAt = time.Now().Add(time.Duration(*maxTxTimeoutSec) * time.Second)
 		idleTimeout = nil
 	}
 	// Create entry
@@ -372,7 +372,7 @@ func (dm *DsManager) CloseTx(txID string) error {
 }
 
 // QueryContext queries the database
-func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
+func (dm *DsManager) Query(ctx context.Context, timeoutSec int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
 	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_READ)
 	if err != nil {
 		return nil, nil, err
@@ -380,8 +380,8 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx i
 	time.Sleep(5 * time.Second) // for test
 
 	timeout := ds.DefaultQueryTimeout
-	if timeoutSec != nil {
-		timeout = time.Duration(*timeoutSec) * time.Second
+	if timeoutSec > 0 {
+		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	ctx, cancelCtx := context.WithTimeout(ctx, timeout)
 
@@ -396,15 +396,15 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec *int, datasourceIdx i
 }
 
 // QueryContext queries the database
-func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, int, error) {
+func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, int, error) {
 	entry, ds, err := dm.getTx(txID, true)
 	if err != nil {
 		return nil, nil, -1, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
-	if timeoutSec != nil {
-		timeout = time.Duration(*timeoutSec) * time.Second
+	if timeoutSec > 0 {
+		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	ctx, cancelCtx := context.WithTimeout(ctx, timeout)
 
@@ -422,15 +422,15 @@ func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec *int, txID string, 
 }
 
 // ExecContext executes the database
-func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
+func (dm *DsManager) Execute(ctx context.Context, timeoutSec int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
 	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_WRITE)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
-	if timeoutSec != nil {
-		timeout = time.Duration(*timeoutSec) * time.Second
+	if timeoutSec > 0 {
+		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	ctx, cancelCtx := context.WithTimeout(ctx, timeout)
 
@@ -445,15 +445,15 @@ func (dm *DsManager) Execute(ctx context.Context, timeoutSec *int, datasourceIdx
 }
 
 // ExecContext executes the database
-func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec *int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, int, error) {
+func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, int, error) {
 	entry, ds, err := dm.getTx(txId, true)
 	if err != nil {
 		return nil, nil, -1, err
 	}
 
 	timeout := ds.DefaultQueryTimeout
-	if timeoutSec != nil {
-		timeout = time.Duration(*timeoutSec) * time.Second
+	if timeoutSec > 0 {
+		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	ctx, cancelCtx := context.WithTimeout(ctx, timeout)
 

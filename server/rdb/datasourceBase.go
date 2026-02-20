@@ -18,8 +18,8 @@ import (
 // errAsBadConn wraps an error so that errors.Is(err, driver.ErrBadConn) is true (e.g. for pgx ConnectError).
 type errAsBadConn struct{ err error }
 
-func (e *errAsBadConn) Error() string   { return e.err.Error() }
-func (e *errAsBadConn) Unwrap() error   { return e.err }
+func (e *errAsBadConn) Error() string        { return e.err.Error() }
+func (e *errAsBadConn) Unwrap() error        { return e.err }
 func (e *errAsBadConn) Is(target error) bool { return target == driver.ErrBadConn }
 
 // connectErrorToErrBadConnConnector wraps a driver.Connector and converts *pgconn.ConnectError to an error that Is(driver.ErrBadConn).
@@ -75,8 +75,8 @@ func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(config.MaxOpenConns)
-	db.SetMaxIdleConns(config.MaxIdleConns)
+	db.SetMaxOpenConns(config.PoolConns)
+	db.SetMaxIdleConns(config.PoolConns)
 	if config.MaxConnLifetimeSec > 0 {
 		db.SetConnMaxLifetime(time.Duration(config.MaxConnLifetimeSec) * time.Second)
 	}
@@ -96,16 +96,18 @@ func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 	}, nil
 }
 
-func (d *Datasource) newTx(isolationLevel sql.IsolationLevel) (*sql.Conn, *sql.Tx, error) {
+func (d *Datasource) newTx(isolationLevel *sql.IsolationLevel) (*sql.Conn, *sql.Tx, error) {
 	conn, err := d.DB.Conn(context.Background())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
+	txOptions := &sql.TxOptions{}
+	if isolationLevel != nil {
+		txOptions.Isolation = *isolationLevel
+	}
 	// Begin transaction
-	tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{
-		Isolation: isolationLevel,
-	})
+	tx, err := conn.BeginTx(context.Background(), txOptions)
 
 	if err != nil {
 		conn.Close()

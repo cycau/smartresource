@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,12 +24,11 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ExecuteRequest represents the request body for /v1/rdb/execute
-type ExecuteRequest struct {
+type RequestParams struct {
 	SQL        string       `json:"sql"`
 	Params     []ParamValue `json:"params,omitempty"`
-	TimeoutSec *int         `json:"timeoutSec,omitempty"`
-	LimitRows  *int         `json:"limitRows,omitempty"`
+	TimeoutSec int          `json:"timeoutSec,omitempty"`
+	LimitRows  int          `json:"limitRows,omitempty"`
 }
 
 // INT, LONG, DOUBLE, DECIMAL, BOOL
@@ -194,7 +195,7 @@ func (dh *DmlHandler) QueryTx(w http.ResponseWriter, r *http.Request) {
 	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
 }
 
-func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows, limitRows *int, startTime time.Time) error {
+func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows, limitRows int, startTime time.Time) error {
 
 	// Get column information
 	columns, err := rows.Columns()
@@ -219,8 +220,8 @@ func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows,
 	}
 
 	limit := math.MaxInt32
-	if limitRows != nil && *limitRows > 0 {
-		limit = *limitRows
+	if limitRows > 0 {
+		limit = limitRows
 	}
 
 	// Read rows
@@ -439,23 +440,38 @@ func (dh *DmlHandler) StatsGet(datasourceIdx int) (latencyP95Ms int, errorRate1m
  * Private methods
  ************************************************************/
 
-func (dh *DmlHandler) parseRequest(r *http.Request) (request ExecuteRequest, params []any, err error) {
-	var req ExecuteRequest
+func (dh *DmlHandler) parseRequest(r *http.Request) (request *RequestParams, params []any, err error) {
+	if r.Body != nil {
+		defer func() {
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+		}()
+	}
+
+	var req RequestParams
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return ExecuteRequest{}, nil, fmt.Errorf("failed to parse request: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	if req.SQL == "" {
-		return ExecuteRequest{}, nil, fmt.Errorf("SQL is required")
+		return nil, nil, fmt.Errorf("SQL is required")
 	}
 
 	// Convert params
 	parameters, err := convertParams(req.Params)
 	if err != nil {
-		return ExecuteRequest{}, nil, fmt.Errorf("failed to convert params: %w", err)
+		return nil, nil, fmt.Errorf("failed to convert params: %w", err)
 	}
 
-	return req, parameters, nil
+	timeoutSec := r.Header.Get(HEADER_TIMEOUT_SEC)
+	if timeoutSec != "" {
+		timeoutSecInt, err := strconv.Atoi(timeoutSec)
+		if err == nil {
+			req.TimeoutSec = timeoutSecInt
+		}
+	}
+
+	return &req, parameters, nil
 }
 
 func convertParams(params []ParamValue) ([]any, error) {

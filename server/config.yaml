@@ -1,13 +1,11 @@
 nodeName: "dbapi-1"
-nodePort: 5678
+nodePort: 5679
 maxHttpQueue: 10000
 secretKey: "secret-key"
 
 clusterNodes:
   - "http://localhost:5678"
-  - "http://localhost:5678"
-  - "http://localhost:5678"
-  - "http://localhost:5678"
+  - "http://localhost:5679"
 
 
 myDatasources:
@@ -15,8 +13,7 @@ myDatasources:
     databaseName: crm-system
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
-    maxOpenConns: 20
-    maxIdleConns: 20
+    poolConns: 20
     maxWriteConns: 5
     minWriteConns: 2
     maxConnLifetimeSec: 1800
@@ -26,8 +23,7 @@ myDatasources:
     databaseName: crm-system
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
-    maxOpenConns: 20
-    maxIdleConns: 20
+    poolConns: 20
     maxWriteConns: 5
     minWriteConns: 2
     maxConnLifetimeSec: 1800

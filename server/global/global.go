@@ -26,8 +26,7 @@ type DatasourceConfig struct {
 	DatabaseName       string `yaml:"databaseName"`
 	Driver             string `yaml:"driver"`
 	DSN                string `yaml:"dsn"`
-	MaxOpenConns       int    `yaml:"maxOpenConns"`
-	MaxIdleConns       int    `yaml:"maxIdleConns"`
+	PoolConns          int    `yaml:"poolConns"`
 	MaxConnLifetimeSec int    `yaml:"maxConnLifetimeSec"`
 
 	MaxWriteConns          int `yaml:"maxWriteConns"`
@@ -36,11 +35,11 @@ type DatasourceConfig struct {
 	DefaultQueryTimeoutSec int `yaml:"defaultQueryTimeoutSec"`
 }
 
-const HEADER_SECRET_KEY = "X-Secret-Key"
-const HEADER_DB_NAME = "_Cy_DbName"
-const HEADER_TX_ID = "_Cy_TxID"
-const HEADER_REDIRECT_COUNT = "_Cy_RdCount"
-const HEADER_TIMEOUT_SEC = "_Cy_TimeoutSec"
+const HEADER_SECRET_KEY = "_cy_SecretKey"
+const HEADER_DB_NAME = "_cy_DbName"
+const HEADER_TX_ID = "_cy_TxID"
+const HEADER_REDIRECT_COUNT = "_cy_RdCount"
+const HEADER_TIMEOUT_SEC = "_cy_TimeoutSec"
 
 const EP_PATH_QUERY = "/query"
 const EP_PATH_EXECUTE = "/execute"

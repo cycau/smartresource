@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -124,7 +125,11 @@ func (b *Balancer) SelectNode(next http.Handler) http.Handler {
 			return
 		}
 
-		// 307 Temporary Redirect
+		// 307 Temporary Redirect（Bodyを読み切らないとKeep-Alive接続で次のリクエストに残りデータが混ざる）
+		if r.Body != nil {
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+		}
 		w.Header().Set("Location", recommendNode.NodeID)
 		w.WriteHeader(http.StatusTemporaryRedirect)
 		log.Printf("###[Balancer] Redirecting to Node[%s]", recommendNode.NodeID)

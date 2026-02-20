@@ -24,8 +24,8 @@ func runServer(config global.Config) {
 	datasourceInfo := make([]cluster.DatasourceInfo, len(config.MyDatasources))
 	for i := range config.MyDatasources {
 		dsConfig := &config.MyDatasources[i]
-		if dsConfig.MaxWriteConns > dsConfig.MaxOpenConns {
-			dsConfig.MaxWriteConns = dsConfig.MaxOpenConns
+		if dsConfig.MaxWriteConns > dsConfig.PoolConns {
+			dsConfig.MaxWriteConns = dsConfig.PoolConns
 		}
 		if dsConfig.MinWriteConns > dsConfig.MaxWriteConns {
 			dsConfig.MinWriteConns = dsConfig.MaxWriteConns

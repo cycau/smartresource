@@ -5,15 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	. "smartdatastream/server/global"
 	"time"
 )
 
 // BeginTxRequest represents the request body for /v1/rdb/tx/begin
-type BeginTxRequest struct {
-	IsolationLevel string `json:"isolationLevel,omitempty"`
-	TimeoutSec     *int   `json:"timeoutSec,omitempty"`
+type TxRequestParams struct {
+	IsolationLevel  *string `json:"isolationLevel,omitempty"`
+	MaxTxTimeoutSec *int    `json:"maxTxTimeoutSec,omitempty"`
 }
 
 // BeginTxResponse represents the response for /v1/rdb/tx/begin
@@ -48,7 +49,7 @@ func (th *TxHandler) BeginTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Begin transaction (default isolation level: ReadCommitted)
-	txEntry, err := th.dsManager.BeginTx(dsIDX, isolationLevel, req.TimeoutSec)
+	txEntry, err := th.dsManager.BeginTx(dsIDX, isolationLevel, req.MaxTxTimeoutSec)
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			writeError(w, http.StatusRequestTimeout, "TIMEOUT", "Request timeout")
@@ -159,24 +160,35 @@ func (th *TxHandler) CloseTx(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (th *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sql.IsolationLevel, error) {
-	var req BeginTxRequest
+func (th *TxHandler) parseBeginRequest(r *http.Request) (int, *TxRequestParams, *sql.IsolationLevel, error) {
+	if r.Body != nil {
+		defer func() {
+			io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+		}()
+	}
+
+	var req TxRequestParams
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("failed to parse request: %w", err)
+		return -1, nil, nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// get datasourceId from context
 	dsIDX, ok := GetCtxDsIdx(r)
 	if !ok {
-		return -1, BeginTxRequest{}, sql.LevelReadCommitted, fmt.Errorf("datasource INDEX is required")
+		return -1, nil, nil, fmt.Errorf("datasource INDEX is required")
 	}
 
-	isolationLevel := sql.LevelReadCommitted
-	switch req.IsolationLevel {
-	case "READ_UNCOMMITTED":
-		isolationLevel = sql.LevelReadUncommitted
+	if req.IsolationLevel == nil {
+		return dsIDX, &req, nil, nil
+	}
+
+	isolationLevel := sql.LevelDefault
+	switch *req.IsolationLevel {
 	case "READ_COMMITTED":
 		isolationLevel = sql.LevelReadCommitted
+	case "READ_UNCOMMITTED":
+		isolationLevel = sql.LevelReadUncommitted
 	case "WRITE_COMMITTED":
 		isolationLevel = sql.LevelWriteCommitted
 	case "REPEATABLE_READ":
@@ -189,7 +201,7 @@ func (th *TxHandler) parseBeginRequest(r *http.Request) (int, BeginTxRequest, sq
 		isolationLevel = sql.LevelLinearizable
 	}
 
-	return dsIDX, req, isolationLevel, nil
+	return dsIDX, &req, &isolationLevel, nil
 }
 
 func getTxID(r *http.Request) string {
