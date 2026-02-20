@@ -60,12 +60,12 @@ type QueryResponse struct {
 	Meta          []ColumnMeta `json:"meta,omitempty"`
 	Rows          []any        `json:"rows"`
 	TotalCount    int          `json:"totalCount"`
-	ElapsedTimeMs int64        `json:"elapsedTimeMs"`
+	ElapsedTimeUs int64        `json:"elapsedTimeUs"`
 }
 
 type ExecuteResponse struct {
 	EffectedRows  int64 `json:"effectedRows"`
-	ElapsedTimeMs int64 `json:"elapsedTimeMs"`
+	ElapsedTimeUs int64 `json:"elapsedTimeUs"`
 }
 
 // ColumnMeta contains metadata about a column
@@ -269,15 +269,12 @@ func (dh *DmlHandler) responseQueryResult(w http.ResponseWriter, rows *sql.Rows,
 		return fmt.Errorf("row iteration error: %w", err)
 	}
 
-	// Calculate execution time
-	elapsedTimeMs := time.Since(startTime).Milliseconds()
-
 	// Write response
 	response := QueryResponse{
 		Meta:          columnMeta,
 		Rows:          resultRows,
 		TotalCount:    rowCount,
-		ElapsedTimeMs: elapsedTimeMs,
+		ElapsedTimeUs: time.Since(startTime).Microseconds(),
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -324,16 +321,13 @@ func (dh *DmlHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate execution time
-	elapsedTimeMs := time.Since(startTime).Milliseconds()
-
 	// Update health info: record successful execution
-	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
+	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
 
 	// Write response
 	response := ExecuteResponse{
 		EffectedRows:  affectedRows,
-		ElapsedTimeMs: elapsedTimeMs,
+		ElapsedTimeUs: time.Since(startTime).Microseconds(),
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -378,16 +372,13 @@ func (dh *DmlHandler) ExecuteTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate execution time
-	elapsedTimeMs := time.Since(startTime).Milliseconds()
-
 	// Update health info: record successful execution
-	dh.statsSetResult(dsIDX, elapsedTimeMs, false, false)
+	dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, false)
 
 	// Write response
 	response := ExecuteResponse{
 		EffectedRows:  affectedRows,
-		ElapsedTimeMs: elapsedTimeMs,
+		ElapsedTimeUs: time.Since(startTime).Microseconds(),
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

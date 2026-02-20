@@ -73,7 +73,7 @@ func beginTx(databaseName string, isolationLevel *IsolationLevel, maxTxTimeoutSe
 	if maxTxTimeoutSec != nil {
 		body["maxTxTimeoutSec"] = *maxTxTimeoutSec
 	}
-	resp, err := executor.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 3, 3, 0)
+	resp, err := executor.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 0, 3, 3)
 	if err != nil {
 		return "", -1, err
 	}

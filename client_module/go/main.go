@@ -25,7 +25,7 @@ func main() {
 		return
 	}
 
-	count := 100000
+	count := 1
 	if len(os.Args) > 1 {
 		cnt, _ := strconv.ParseInt(os.Args[1], 10, 64)
 		count = int(cnt)
@@ -48,15 +48,15 @@ func main() {
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()
-				result, err := test.Test1()
+				result, err := test.TestRandomTxCommit()
 				if err != nil {
 					log.Printf("Test error: %v", err)
 					countError.Add(1)
-				} else {
-					if j == 0 {
-						log.Printf("Test result: %+v", result)
-					}
-					countOK.Add(1)
+					return
+				}
+				countOK.Add(1)
+				if j == 0 {
+					log.Printf("Test result: %+v", result)
 				}
 			}(j)
 		}

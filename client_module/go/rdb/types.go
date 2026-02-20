@@ -49,13 +49,13 @@ type queryResult struct {
 	Meta          []ColumnMeta `json:"meta,omitempty"`
 	Rows          [][]any      `json:"rows"`
 	TotalCount    int          `json:"totalCount"`
-	ElapsedTimeMs int64        `json:"elapsedTimeMs"`
+	ElapsedTimeUs int64        `json:"elapsedTimeUs"`
 }
 
 // ExecuteResult は Execute の結果
 type ExecuteResult struct {
 	EffectedRows  int64 `json:"effectedRows"`
-	ElapsedTimeMs int64 `json:"elapsedTimeMs"`
+	ElapsedTimeUs int64 `json:"elapsedTimeUs"`
 }
 
 type TxInfo struct {
@@ -92,7 +92,7 @@ type Records struct {
 	Meta          []ColumnMeta
 	Rows          []Record
 	TotalCount    int
-	ElapsedTimeMs int64
+	ElapsedTimeUs int64
 }
 
 func (r *Records) Get(rowIndex int) *Record {

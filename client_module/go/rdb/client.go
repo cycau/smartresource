@@ -102,9 +102,11 @@ func Init(nodes []NodeEntry, maxConcurrency int, defaultQueryTimeoutSec int) err
 	log.Println("### [Init] entries:", nodes)
 
 	defaultDatabase, err := executor.Init(nodes, maxConcurrency, defaultQueryTimeoutSec)
-	dEFAULT_DATABASE = defaultDatabase
+	if dEFAULT_DATABASE == "" {
+		dEFAULT_DATABASE = defaultDatabase
+	}
 
-	log.Println("### [Init] defaultDatabase:", defaultDatabase)
+	log.Println("### [Init] defaultDatabase:", dEFAULT_DATABASE)
 	log.Println("### [Init] defaultQueryTimeoutSec:", defaultQueryTimeoutSec)
 	return err
 }
@@ -125,13 +127,8 @@ func InitWithConfig(configPath string) error {
 		}
 	}
 
-	defaultDatabase, err := executor.Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
-	if config.DefaultDatabase != "" {
-		dEFAULT_DATABASE = config.DefaultDatabase
-	} else {
-		dEFAULT_DATABASE = defaultDatabase
-	}
-	return err
+	dEFAULT_DATABASE = config.DefaultDatabase
+	return Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
 }
 
 /**************************************************
@@ -201,7 +198,7 @@ func (c *Client) Query(sql string, params *Params, opts *QueryOptions) (*Records
 		timeoutSec = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, timeoutSec)
+	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, timeoutSec, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +225,7 @@ func (c *Client) Execute(sql string, params *Params) (*ExecuteResult, error) {
 		"params": paramValues,
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, 0)
+	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 0, 3, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +242,7 @@ func convertResult(result queryResult) *Records {
 		colMap:        make(map[string]int),
 		Rows:          make([]Record, len(result.Rows)),
 		TotalCount:    result.TotalCount,
-		ElapsedTimeMs: result.ElapsedTimeMs,
+		ElapsedTimeUs: result.ElapsedTimeUs,
 	}
 	for i, col := range result.Meta {
 		records.colMap[col.Name] = i

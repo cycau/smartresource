@@ -377,7 +377,7 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec int, datasourceIdx in
 	if err != nil {
 		return nil, nil, err
 	}
-	time.Sleep(5 * time.Second) // for test
+	//time.Sleep(5 * time.Second) // TODO:for test
 
 	timeout := ds.DefaultQueryTimeout
 	if timeoutSec > 0 {

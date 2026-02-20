@@ -48,23 +48,90 @@ func MakeTestData(count int) {
 	}
 }
 
-func Test1() (*smartclient.Records, error) {
+func TestRandomSelect() (*smartclient.Records, error) {
 
 	dbClient := smartclient.Get("crm-system")
 	id := rand.Intn(1000000)
 	idStr := "0000000" + strconv.Itoa(id)
 	idStr = idStr[len(idStr)-7:]
 	params := smartclient.NewParams().
-		Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
+		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
+		Add("d5794b1b-5f92-4dc6-aa48-085d_"+idStr, smartclient.ValueType_STRING)
+
 	records, err := dbClient.Query(
-		"SELECT * FROM sys_users where user_id = $1",
+		"SELECT * FROM users where id = $1",
 		params,
 		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("Test error: %w", err)
 	}
-	fmt.Printf("Test1 result: %s %s\n", idStr, records.Get(0).Get("user_id"))
+	//fmt.Printf("Test1 result: %s %s\n", idStr, records.Get(0).Get("id"))
 
+	return records, nil
+}
+func TestRandomUpdate() (*smartclient.ExecuteResult, error) {
+
+	dbClient := smartclient.Get("crm-system")
+	id := rand.Intn(1000000)
+	idStr := "0000000" + strconv.Itoa(id)
+	idStr = idStr[len(idStr)-7:]
+	params := smartclient.NewParams().
+		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
+		Add("d5794b1b-5f92-4dc6-aa48-085d_"+idStr, smartclient.ValueType_STRING).
+		Add("john@example.com_"+idStr, smartclient.ValueType_STRING)
+
+	result, err := dbClient.Execute(
+		"UPDATE users SET email = $2 WHERE id = $1",
+		params,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("TestUpdate error: %w", err)
+	}
+	return result, nil
+}
+func TestRandomTxCommit() (*smartclient.Records, error) {
+
+	txClient, err := smartclient.NewTx("crm-system", nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("NewTx error: %w", err)
+	}
+	defer txClient.Close()
+	id := rand.Intn(1000000)
+	idStr := "0000000" + strconv.Itoa(id)
+	idStr = idStr[len(idStr)-7:]
+	userId := "d5794b1b-5f92-4dc6-aa48-085d_" + idStr
+	email := "john@example.com_" + idStr
+	params := smartclient.NewParams().
+		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
+		Add(userId, smartclient.ValueType_STRING).
+		Add(email, smartclient.ValueType_STRING)
+
+	_, err = txClient.Execute(
+		"UPDATE users SET email = $2 WHERE id = $1",
+		params,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("TestUpdate error: %w", err)
+	}
+	params = smartclient.NewParams().
+		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
+		Add(userId, smartclient.ValueType_STRING)
+
+	records, err := txClient.Query(
+		"SELECT * FROM users where id = $1",
+		params,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Test error: %w", err)
+	}
+	if records.Get(0).Get("email") != email {
+		return nil, fmt.Errorf("email mismatch: %w", err)
+	}
+	err = txClient.Commit()
+	if err != nil {
+		return nil, fmt.Errorf("CommitTx error: %w", err)
+	}
 	return records, nil
 }
