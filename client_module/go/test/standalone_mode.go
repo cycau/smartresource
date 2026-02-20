@@ -59,10 +59,7 @@ func Test1() (*smartclient.Records, error) {
 	records, err := dbClient.Query(
 		"SELECT * FROM sys_users where user_id = $1",
 		params,
-		smartclient.QueryOptions{
-			LimitRows:  100,
-			TimeoutSec: 180,
-		},
+		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("Test error: %w", err)

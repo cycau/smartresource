@@ -17,27 +17,19 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-type smartSwitcher struct {
-	candidates []nodeInfo
-	httpClient *http.Client
-	sem        *semaphore.Weighted
+type switcher struct {
+	defaultRequestTimeoutSec int
+	candidates               []nodeInfo
+	sem                      *semaphore.Weighted
 }
 
-var switcher = &smartSwitcher{}
+var executor = &switcher{}
 var httpClient *http.Client
 
-func (s *smartSwitcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
-	log.Println("###[Init] entries:", entries)
-	log.Println("###[Init] maxConcurrency:", maxConcurrency)
-	log.Println("###[Init] defaultRequestTimeoutSec:", defaultRequestTimeoutSec)
-
-	count := len(entries)
-	if count == 0 {
-		return "", fmt.Errorf("No cluster nodes configured.")
-	}
+func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
 
 	httpClient = &http.Client{
-		Timeout: time.Duration(defaultRequestTimeoutSec) * time.Second, // サーバー側の query が 15s 超になることがあるため余裕を持たせる
+		Timeout: time.Duration(defaultRequestTimeoutSec) * time.Second,
 		Transport: &http.Transport{
 			MaxIdleConns:        maxConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
 			MaxIdleConnsPerHost: maxConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
@@ -46,13 +38,13 @@ func (s *smartSwitcher) Init(entries []NodeEntry, maxConcurrency int, defaultReq
 
 			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
 				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
+				KeepAlive: 15 * time.Second,
 			}).DialContext,
 			IdleConnTimeout: 60 * time.Second, // アイドル接続のタイムアウト
 		},
 	}
 
-	candidates := make([]nodeInfo, count)
+	candidates := make([]nodeInfo, len(entries))
 
 	errNode := ""
 	var wg sync.WaitGroup
@@ -84,6 +76,7 @@ func (s *smartSwitcher) Init(entries []NodeEntry, maxConcurrency int, defaultReq
 		return "", fmt.Errorf("failed to connect to node. %s", errNode)
 	}
 
+	s.defaultRequestTimeoutSec = defaultRequestTimeoutSec
 	s.candidates = candidates
 	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
 
@@ -91,14 +84,14 @@ func (s *smartSwitcher) Init(entries []NodeEntry, maxConcurrency int, defaultReq
 }
 
 // RequestTimeout は 0 のときクライアント共通タイムアウトのみ。>0 のときこのリクエスト専用のタイムアウトを指定（先に切れた方が有効）。
-func (s *smartSwitcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, redirectCount int, retryCount int, timoutSec int) (*smartResponse, error) {
+func (s *switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, redirectCount int, retryCount int) (*smartResponse, error) {
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	node := &s.candidates[nodeIdx]
 
-	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, redirectCount, timoutSec)
+	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, redirectCount)
 	if resp == nil {
 		return nil, err
 	}
@@ -136,13 +129,13 @@ func (s *smartSwitcher) Request(dbName string, endpoint endpointType, method str
 	}
 
 	// retry
-	return s.Request(dbName, endpoint, method, headers, body, redirectCount, retryCount, timoutSec)
+	return s.Request(dbName, endpoint, method, headers, body, timoutSec, redirectCount, retryCount)
 }
 
-func (s *smartSwitcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*smartResponse, error) {
+func (s *switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*smartResponse, error) {
 	node := &s.candidates[nodeIdx]
 
-	return s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, 0, timoutSec)
+	return s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, 0)
 }
 
 type smartResponse struct {
@@ -151,30 +144,27 @@ type smartResponse struct {
 	Release func()
 }
 
-func (s *smartSwitcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, redirectCount int, timoutSec int) (*smartResponse, error) {
+func (s *switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, timoutSec int, redirectCount int) (*smartResponse, error) {
 	// redirect多発する場合は並列数調整役割も兼ねる
 	if err := s.sem.Acquire(context.Background(), 1); err != nil {
 		return nil, err
 	}
 	defer s.sem.Release(1)
 
-	u := baseURL + "/rdb" + getEndpointPath(endpoint)
-	var ctxCancel context.CancelFunc
-	var req *http.Request
-	var err error
-	if timoutSec > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timoutSec+1)*time.Second)
-		ctxCancel = cancel
-		req, err = http.NewRequestWithContext(ctx, method, u, nil)
-	} else {
-		req, err = http.NewRequest(method, u, nil)
+	if timoutSec < 1 {
+		timoutSec = s.defaultRequestTimeoutSec
 	}
+	// +3sec to let server side to handle timeout. important!
+	ctx, ctxCancel := context.WithTimeout(context.Background(), time.Duration(timoutSec+3)*time.Second)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+"/rdb"+getEndpointPath(endpoint), nil)
 	if err != nil {
+		ctxCancel()
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set(hEADER_SECRET_KEY, secretKey)
 	req.Header.Set(hEADER_REDIRECT_COUNT, strconv.Itoa(redirectCount))
+	req.Header.Set(hEADER_TIMEOUT_SEC, strconv.Itoa(timoutSec))
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -182,6 +172,7 @@ func (s *smartSwitcher) requestHttp(nodeIdx int, baseURL string, secretKey strin
 	if body != nil {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			ctxCancel()
 			return nil, err
 		}
 		req.Body = io.NopCloser(&buf)
@@ -194,9 +185,7 @@ func (s *smartSwitcher) requestHttp(nodeIdx int, baseURL string, secretKey strin
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 		}
-		if ctxCancel != nil {
-			ctxCancel()
-		}
+		ctxCancel()
 		return nil, err
 	}
 
@@ -252,7 +241,7 @@ func (s *smartSwitcher) requestHttp(nodeIdx int, baseURL string, secretKey strin
 
 const pROBLEMATIC_NODE_CHECK_INTERVAL = 15 * time.Second
 
-func (s *smartSwitcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, err error) {
+func (s *switcher) selectNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, err error) {
 	nodeIdx, dsIdx, problematicNodes, err := s.selectRandomNode(dbName, endpoint)
 
 	if err != nil {
@@ -325,7 +314,7 @@ type dsCandidate struct {
 	weight  float64
 }
 
-func (s *smartSwitcher) selectRandomNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
+func (s *switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeIdx int, dsIdx int, problematicNodes []int, err error) {
 	if len(s.candidates) == 0 {
 		return -1, -1, nil, fmt.Errorf("Node Candidates are not initialized yet.")
 	}
@@ -362,13 +351,13 @@ func (s *smartSwitcher) selectRandomNode(dbName string, endpoint endpointType) (
 			weight := 0.0
 			switch endpoint {
 			case ep_QUERY:
-				weight = float64(ds.MaxOpenConns - ds.MinWriteConns)
+				weight = float64(ds.PoolConns - ds.MinWriteConns)
 			case ep_EXECUTE:
 				weight = float64(ds.MaxWriteConns)
 			case ep_TX_BEGIN:
 				weight = float64(ds.MaxWriteConns+ds.MinWriteConns) / 2.0
 			default:
-				weight = float64(ds.MaxOpenConns)
+				weight = float64(ds.PoolConns)
 			}
 			if weight <= 0 {
 				continue

@@ -3,6 +3,7 @@ package smartclient
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -48,11 +49,11 @@ func getEndpointPath(ep endpointType) string {
 	}
 }
 
-const hEADER_SECRET_KEY = "X-Secret-Key"
-const hEADER_DB_NAME = "_Cy_DbName"
-const hEADER_TX_ID = "_Cy_TxID"
-const hEADER_REDIRECT_COUNT = "_Cy_RdCount"
-const uNLIMITED_REQUEST_TIMEOUT_SEC = 900
+const hEADER_SECRET_KEY = "_cy_SecretKey"
+const hEADER_DB_NAME = "_cy_DbName"
+const hEADER_TX_ID = "_cy_TxID"
+const hEADER_REDIRECT_COUNT = "_cy_RdCount"
+const hEADER_TIMEOUT_SEC = "_cy_TimeoutSec"
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
@@ -79,16 +80,32 @@ type datasourceInfo struct {
 	DatasourceID  string `json:"datasourceId"`
 	DatabaseName  string `json:"databaseName"`
 	Active        bool   `json:"active"`
-	MaxOpenConns  int    `json:"maxOpenConns"`
+	PoolConns     int    `json:"poolConns"`
 	MaxWriteConns int    `json:"maxWriteConns"`
 	MinWriteConns int    `json:"minWriteConns"`
 }
 
 var dEFAULT_DATABASE = ""
 
-func Init(nodes []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) error {
-	defaultDatabase, err := switcher.Init(nodes, maxConcurrency, defaultRequestTimeoutSec)
+func Init(nodes []NodeEntry, maxConcurrency int, defaultQueryTimeoutSec int) error {
+	if len(nodes) < 1 {
+		return fmt.Errorf("No cluster nodes configured.")
+	}
+	if maxConcurrency < 1 {
+		maxConcurrency = 50
+	}
+	if defaultQueryTimeoutSec < 1 {
+		defaultQueryTimeoutSec = 30
+	}
+
+	log.Println("### [Init] maxConcurrency:", maxConcurrency)
+	log.Println("### [Init] entries:", nodes)
+
+	defaultDatabase, err := executor.Init(nodes, maxConcurrency, defaultQueryTimeoutSec)
 	dEFAULT_DATABASE = defaultDatabase
+
+	log.Println("### [Init] defaultDatabase:", defaultDatabase)
+	log.Println("### [Init] defaultQueryTimeoutSec:", defaultQueryTimeoutSec)
 	return err
 }
 
@@ -108,7 +125,7 @@ func InitWithConfig(configPath string) error {
 		}
 	}
 
-	defaultDatabase, err := switcher.Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
+	defaultDatabase, err := executor.Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
 	if config.DefaultDatabase != "" {
 		dEFAULT_DATABASE = config.DefaultDatabase
 	} else {
@@ -123,7 +140,7 @@ func InitWithConfig(configPath string) error {
 
 type Client struct {
 	dbName   string
-	executor *smartSwitcher
+	executor *switcher
 }
 
 // Get は databaseName 用のクライアントを返す。空の場合は defaultDatabase を使用する
@@ -133,7 +150,7 @@ func Get(databaseName string) *Client {
 	}
 	return &Client{
 		dbName:   databaseName,
-		executor: switcher,
+		executor: executor,
 	}
 }
 
@@ -163,7 +180,7 @@ func NewParams() *Params {
 	}
 }
 
-func (c *Client) Query(sql string, params *Params, opts QueryOptions) (*Records, error) {
+func (c *Client) Query(sql string, params *Params, opts *QueryOptions) (*Records, error) {
 
 	headers := map[string]string{
 		hEADER_DB_NAME: c.dbName,
@@ -176,14 +193,15 @@ func (c *Client) Query(sql string, params *Params, opts QueryOptions) (*Records,
 		"sql":    sql,
 		"params": paramValues,
 	}
-	if opts.LimitRows > 0 {
-		body["limitRows"] = opts.LimitRows
-	}
-	if opts.TimeoutSec > 0 {
-		body["timeoutSec"] = opts.TimeoutSec
+	timeoutSec := 0
+	if opts != nil {
+		if opts.LimitRows > 0 {
+			body["limitRows"] = opts.LimitRows
+		}
+		timeoutSec = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, opts.TimeoutSec)
+	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, 3, 3, timeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +228,7 @@ func (c *Client) Execute(sql string, params *Params) (*ExecuteResult, error) {
 		"params": paramValues,
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, uNLIMITED_REQUEST_TIMEOUT_SEC)
+	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 3, 3, 0)
 	if err != nil {
 		return nil, err
 	}
