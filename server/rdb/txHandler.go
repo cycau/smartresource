@@ -185,20 +185,16 @@ func (th *TxHandler) parseBeginRequest(r *http.Request) (int, *TxRequestParams, 
 
 	isolationLevel := sql.LevelDefault
 	switch *req.IsolationLevel {
-	case "READ_COMMITTED":
-		isolationLevel = sql.LevelReadCommitted
 	case "READ_UNCOMMITTED":
 		isolationLevel = sql.LevelReadUncommitted
-	case "WRITE_COMMITTED":
-		isolationLevel = sql.LevelWriteCommitted
+	case "READ_COMMITTED":
+		isolationLevel = sql.LevelReadCommitted
 	case "REPEATABLE_READ":
 		isolationLevel = sql.LevelRepeatableRead
-	case "SNAPSHOT":
-		isolationLevel = sql.LevelSnapshot
 	case "SERIALIZABLE":
 		isolationLevel = sql.LevelSerializable
-	case "LINEARIZABLE":
-		isolationLevel = sql.LevelLinearizable
+	default:
+		return -1, nil, nil, fmt.Errorf("invalid isolation level: %s", *req.IsolationLevel)
 	}
 
 	return dsIDX, &req, &isolationLevel, nil
