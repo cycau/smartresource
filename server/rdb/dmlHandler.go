@@ -173,7 +173,9 @@ func (dh *DmlHandler) QueryTx(w http.ResponseWriter, r *http.Request) {
 
 	// Execute query in transaction
 	rows, releaseResource, dsIDX, queryErr := dh.dsManager.QueryTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
-	defer releaseResource()
+	if releaseResource != nil {
+		defer releaseResource()
+	}
 	if queryErr != nil {
 		if r.Context().Err() == context.DeadlineExceeded {
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
@@ -353,7 +355,9 @@ func (dh *DmlHandler) ExecuteTx(w http.ResponseWriter, r *http.Request) {
 
 	// Execute in transaction
 	result, releaseResource, dsIDX, execErr := dh.dsManager.ExecuteTx(r.Context(), req.TimeoutSec, txID, req.SQL, parameters...)
-	defer releaseResource()
+	if releaseResource != nil {
+		defer releaseResource()
+	}
 	if execErr != nil {
 		if r.Context().Err() == context.DeadlineExceeded {
 			dh.statsSetResult(dsIDX, time.Since(startTime).Milliseconds(), false, true)
@@ -387,6 +391,10 @@ func (dh *DmlHandler) ExecuteTx(w http.ResponseWriter, r *http.Request) {
 }
 
 func (dh *DmlHandler) statsSetResult(datasourceIdx int, latencyMs int64, isError bool, isTimeout bool) {
+	if datasourceIdx < 0 {
+		return // When invalid TxID
+	}
+
 	stats := dh.statsInfos[datasourceIdx]
 	stats.mu.Lock()
 	defer stats.mu.Unlock()

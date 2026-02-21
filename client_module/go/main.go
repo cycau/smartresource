@@ -48,7 +48,7 @@ func main() {
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()
-				result, err := test.TestRandomTxCommit()
+				result, err := test.TestRandomTx()
 				if err != nil {
 					log.Printf("Test error: %v", err)
 					countError.Add(1)

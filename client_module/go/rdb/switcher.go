@@ -20,7 +20,8 @@ import (
 type switcher struct {
 	defaultRequestTimeoutSec int
 	candidates               []nodeInfo
-	sem                      *semaphore.Weighted
+	semNoneTx                *semaphore.Weighted
+	semTx                    *semaphore.Weighted
 }
 
 var executor = &switcher{}
@@ -78,20 +79,30 @@ func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestT
 
 	s.defaultRequestTimeoutSec = defaultRequestTimeoutSec
 	s.candidates = candidates
-	s.sem = semaphore.NewWeighted(int64(maxConcurrency))
+	txMaxConcurrency := maxConcurrency / 10
+	if txMaxConcurrency < 1 {
+		txMaxConcurrency = 1
+	}
+	s.semNoneTx = semaphore.NewWeighted(int64(maxConcurrency - txMaxConcurrency))
+	s.semTx = semaphore.NewWeighted(int64(txMaxConcurrency))
 
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
 // RequestTimeout は 0 のときクライアント共通タイムアウトのみ。>0 のときこのリクエスト専用のタイムアウトを指定（先に切れた方が有効）。
-func (s *switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, redirectCount int, retryCount int) (*smartResponse, error) {
+func (s *switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, retryCount int) (*smartResponse, error) {
+	if err := s.semNoneTx.Acquire(context.Background(), 1); err != nil {
+		return nil, err
+	}
+	defer s.semNoneTx.Release(1)
+
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	node := &s.candidates[nodeIdx]
 
-	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, redirectCount)
+	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, 2)
 	if resp == nil {
 		return nil, err
 	}
@@ -99,18 +110,15 @@ func (s *switcher) Request(dbName string, endpoint endpointType, method string, 
 	if err == nil {
 		return resp, nil
 	}
-
-	// retry only when network error or connection timeout or capacity error
-	if resp.StatusCode != http.StatusBadGateway &&
-		resp.StatusCode != http.StatusGatewayTimeout &&
-		resp.StatusCode != http.StatusServiceUnavailable {
-
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("Request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
+	bodyBytes, _ := io.ReadAll(resp.Body) // 読み切る
 	resp.Body.Close()
 
+	// retry only when network error or connection timeout or capacity error
+	if !isRetryable(resp.StatusCode) {
+		return nil, fmt.Errorf("Request failed with status %d: %s. error: %v", resp.StatusCode, string(bodyBytes), err)
+	}
+
+	// 他のノードを探すために、ノードの状態を更新
 	node.Mu.Lock()
 	switch resp.StatusCode {
 	case http.StatusBadGateway:
@@ -127,15 +135,62 @@ func (s *switcher) Request(dbName string, endpoint endpointType, method string, 
 	if retryCount < 0 {
 		return nil, fmt.Errorf("Failed to connect to service. Retry count exceeded. Last status: %d error: %v", resp.StatusCode, err)
 	}
+	time.Sleep(300 * time.Millisecond)
 
 	// retry
-	return s.Request(dbName, endpoint, method, headers, body, timoutSec, redirectCount, retryCount)
+	return s.Request(dbName, endpoint, method, headers, body, timoutSec, retryCount)
 }
 
-func (s *switcher) RequestTargetNode(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int) (*smartResponse, error) {
-	node := &s.candidates[nodeIdx]
+func (s *switcher) RequestTx(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, retryCount int) (*smartResponse, error) {
+	if err := s.semTx.Acquire(context.Background(), 1); err != nil {
+		return nil, err
+	}
+	defer s.semTx.Release(1)
 
-	return s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, 0)
+	node := &s.candidates[nodeIdx]
+	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, 0)
+	if resp == nil {
+		return nil, err
+	}
+	// OK response
+	if err == nil {
+		return resp, nil
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body) // 読み切る
+	resp.Body.Close()
+
+	// retry only when network error or connection timeout or capacity error
+	if !isRetryable(resp.StatusCode) {
+		return nil, fmt.Errorf("Request failed with status %d: %s. error: %v", resp.StatusCode, string(bodyBytes), err)
+	}
+
+	retryCount--
+	switch retryCount {
+	case 2:
+		time.Sleep(500 * time.Millisecond)
+	case 1:
+		time.Sleep(500 * time.Millisecond)
+	case 0:
+		time.Sleep(2500 * time.Millisecond)
+	case -1:
+		return nil, fmt.Errorf("Failed to connect to service. Retry count exceeded. Last status: %d error: %v", resp.StatusCode, err)
+	}
+
+	// retry
+	return s.RequestTx(nodeIdx, endpoint, method, headers, body, timoutSec, retryCount)
+
+}
+func isRetryable(statusCode int) bool {
+	if statusCode == http.StatusBadGateway {
+		return true
+	}
+	if statusCode == http.StatusGatewayTimeout {
+		return true
+	}
+	if statusCode == http.StatusServiceUnavailable {
+		return true
+	}
+	return false
 }
 
 type smartResponse struct {
@@ -145,12 +200,6 @@ type smartResponse struct {
 }
 
 func (s *switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, endpoint endpointType, method string, headers map[string]string, body any, timoutSec int, redirectCount int) (*smartResponse, error) {
-	// redirect多発する場合は並列数調整役割も兼ねる
-	if err := s.sem.Acquire(context.Background(), 1); err != nil {
-		return nil, err
-	}
-	defer s.sem.Release(1)
-
 	if timoutSec < 1 {
 		timoutSec = s.defaultRequestTimeoutSec
 	}
@@ -196,9 +245,7 @@ func (s *switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 			Release: func() {
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
-				if ctxCancel != nil {
-					ctxCancel()
-				}
+				ctxCancel()
 			},
 		}
 		return sResponse, nil
@@ -206,20 +253,19 @@ func (s *switcher) requestHttp(nodeIdx int, baseURL string, secretKey string, en
 
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if ctxCancel != nil {
-		ctxCancel()
-	}
+	ctxCancel()
+
 	if resp.StatusCode != http.StatusTemporaryRedirect {
 		return nil, fmt.Errorf("query status %d", resp.StatusCode)
 	}
 
 	redirectCount--
-	// redirect control
-	if redirectCount == 1 {
+	switch redirectCount {
+	case 1:
 		time.Sleep(300 * time.Millisecond)
-	} else if redirectCount == 0 {
-		time.Sleep(500 * time.Millisecond)
-	} else if redirectCount < 0 {
+	case 0:
+		time.Sleep(900 * time.Millisecond)
+	case -1:
 		return nil, fmt.Errorf("Redirect count exceeded.")
 	}
 

@@ -198,7 +198,7 @@ func (c *Client) Query(sql string, params *Params, opts *QueryOptions) (*Records
 		timeoutSec = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, timeoutSec, 3, 3)
+	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, timeoutSec, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +225,7 @@ func (c *Client) Execute(sql string, params *Params) (*ExecuteResult, error) {
 		"params": paramValues,
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 0, 3, 3)
+	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 0, 2)
 	if err != nil {
 		return nil, err
 	}

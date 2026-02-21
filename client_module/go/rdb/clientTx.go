@@ -36,7 +36,7 @@ func NewTx(databaseName string, isolationLevel *IsolationLevel, maxTxTimeoutSec 
 	}, nil
 }
 
-func GetTx(txId string) (*TxClient, error) {
+func RestoreTx(txId string) (*TxClient, error) {
 	// Check size
 	if len(txId) < 20 {
 		return nil, fmt.Errorf("invalid txId size")
@@ -73,7 +73,7 @@ func beginTx(databaseName string, isolationLevel *IsolationLevel, maxTxTimeoutSe
 	if maxTxTimeoutSec != nil {
 		body["maxTxTimeoutSec"] = *maxTxTimeoutSec
 	}
-	resp, err := executor.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 0, 3, 3)
+	resp, err := executor.Request(databaseName, ep_TX_BEGIN, http.MethodPost, headers, body, 0, 2)
 	if err != nil {
 		return "", -1, err
 	}
@@ -109,7 +109,7 @@ func (c *TxClient) Query(sql string, params *Params, opts *QueryOptions) (*Recor
 		}
 		timeoutSec = opts.TimeoutSec
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_QUERY, http.MethodPost, headers, body, timeoutSec)
+	resp, err := c.executor.RequestTx(c.nodeIdx, ep_TX_QUERY, http.MethodPost, headers, body, timeoutSec, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func (c *TxClient) Execute(sql string, params *Params) (*ExecuteResult, error) {
 		"params": paramValues,
 	}
 
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body, 0)
+	resp, err := c.executor.RequestTx(c.nodeIdx, ep_TX_EXECUTE, http.MethodPost, headers, body, 0, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (c *TxClient) Commit() error {
 	headers := map[string]string{
 		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil, 0)
+	resp, err := c.executor.RequestTx(c.nodeIdx, ep_TX_COMMIT, http.MethodPut, headers, nil, 0, 2)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func (c *TxClient) Rollback() error {
 	headers := map[string]string{
 		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil, 0)
+	resp, err := c.executor.RequestTx(c.nodeIdx, ep_TX_ROLLBACK, http.MethodPut, headers, nil, 0, 2)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func (c *TxClient) Close() error {
 	headers := map[string]string{
 		hEADER_TX_ID: c.orgTxId,
 	}
-	resp, err := c.executor.RequestTargetNode(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil, 0)
+	resp, err := c.executor.RequestTx(c.nodeIdx, ep_TX_CLOSE, http.MethodPut, headers, nil, 0, 3)
 	if err != nil {
 		return err
 	}

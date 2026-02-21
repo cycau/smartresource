@@ -90,18 +90,20 @@ func TestRandomUpdate() (*smartclient.ExecuteResult, error) {
 	}
 	return result, nil
 }
-func TestRandomTxCommit() (*smartclient.Records, error) {
+func TestRandomTx() (*smartclient.Records, error) {
 
 	txClient, err := smartclient.NewTx("crm-system", nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("NewTx error: %w", err)
 	}
 	defer txClient.Close()
+
 	id := rand.Intn(1000000)
 	idStr := "0000000" + strconv.Itoa(id)
 	idStr = idStr[len(idStr)-7:]
 	userId := "d5794b1b-5f92-4dc6-aa48-085d_" + idStr
-	email := "john@example.com_" + idStr
+	email := "john@example.com_Tx_" + idStr
+
 	params := smartclient.NewParams().
 		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
 		Add(userId, smartclient.ValueType_STRING).

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"smartdatastream/server/global"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ var (
  ************************************************************/
 type TxEntry struct {
 	TxID        string
-	dsIdx       int
 	executing   bool
 	ExpiresAt   time.Time
 	idleTimeout *time.Duration
@@ -89,7 +89,7 @@ const (
 	RESOURCE_TYPE_TX
 )
 
-func (ds *TxDatasource) releaseResource(resourceType ResourceType) {
+func (ds *TxDatasource) releaseSemaphore(resourceType ResourceType) {
 	switch resourceType {
 	case RESOURCE_TYPE_READ:
 		ds.semRead.Release(1)
@@ -199,7 +199,7 @@ func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 	return dm
 }
 
-func (dm *DsManager) allocateResource(ctx context.Context, datasourceIdx int, resourceType ResourceType) (*TxDatasource, error) {
+func (dm *DsManager) allocateSemaphore(ctx context.Context, datasourceIdx int, resourceType ResourceType) (*TxDatasource, error) {
 	ds := dm.dss[datasourceIdx]
 	if ds == nil {
 		return nil, fmt.Errorf("datasource %d not found", datasourceIdx)
@@ -268,14 +268,14 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel *sql.IsolationLev
 		return nil, err
 	}
 
-	ds, err := dm.allocateResource(context.Background(), datasourceIdx, RESOURCE_TYPE_TX)
+	ds, err := dm.allocateSemaphore(context.Background(), datasourceIdx, RESOURCE_TYPE_TX)
 	if err != nil {
 		return nil, err
 	}
 
 	conn, tx, err := ds.newTx(isolationLevel)
 	if err != nil {
-		ds.releaseResource(RESOURCE_TYPE_TX)
+		ds.releaseSemaphore(RESOURCE_TYPE_TX)
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
 
@@ -288,7 +288,6 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel *sql.IsolationLev
 	// Create entry
 	entry := &TxEntry{
 		TxID:        txID,
-		dsIdx:       datasourceIdx,
 		executing:   false,
 		idleTimeout: idleTimeout,
 		ExpiresAt:   expiresAt,
@@ -304,23 +303,23 @@ func (dm *DsManager) BeginTx(datasourceIdx int, isolationLevel *sql.IsolationLev
 }
 
 // Get retrieves a transaction entry and touches it
-func (dm *DsManager) getTx(txID string, executing bool) (entry *TxEntry, srcDs *TxDatasource, err error) {
-	dsIdx, err := global.GetDsIdxFromTxID(txID)
+func (dm *DsManager) getTx(txID string, executing bool) (entry *TxEntry, dsIdx int, err error) {
+	dsIdx, err = global.GetDsIdxFromTxID(txID)
 	if err != nil {
-		return nil, nil, err
+		return nil, -1, err
 	}
 
 	ds := dm.dss[dsIdx]
 	if ds == nil {
-		return nil, nil, fmt.Errorf("datasource not found: %d", dsIdx)
+		return nil, -1, fmt.Errorf("datasource not found: %d", dsIdx)
 	}
 
 	entry, err = ds.getEntry(txID, executing)
 	if err != nil {
-		return nil, nil, err
+		return nil, dsIdx, err
 	}
 
-	return entry, ds, nil
+	return entry, dsIdx, nil
 }
 
 // Commit commits a transaction
@@ -357,23 +356,25 @@ func (dm *DsManager) RollbackTx(txID string) error {
 
 // Rollback rolls back a transaction
 func (dm *DsManager) CloseTx(txID string) error {
-	entry, ds, err := dm.getTx(txID, false)
+	entry, dsIdx, err := dm.getTx(txID, false)
 	if err != nil {
 		return err
 	}
+
+	ds := dm.dss[dsIdx]
 
 	ds.mu.Lock()
 	delete(ds.entries, entry.TxID)
 	ds.mu.Unlock()
 	go entry.Conn.Close()
 
-	ds.releaseResource(RESOURCE_TYPE_TX)
+	ds.releaseSemaphore(RESOURCE_TYPE_TX)
 	return nil
 }
 
 // QueryContext queries the database
 func (dm *DsManager) Query(ctx context.Context, timeoutSec int, datasourceIdx int, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, error) {
-	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_READ)
+	ds, err := dm.allocateSemaphore(ctx, datasourceIdx, RESOURCE_TYPE_READ)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -389,7 +390,7 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec int, datasourceIdx in
 
 	releaseResourceFunc := func() {
 		cancelCtx()
-		ds.releaseResource(RESOURCE_TYPE_READ)
+		ds.releaseSemaphore(RESOURCE_TYPE_READ)
 	}
 
 	return rows, releaseResourceFunc, err
@@ -397,12 +398,12 @@ func (dm *DsManager) Query(ctx context.Context, timeoutSec int, datasourceIdx in
 
 // QueryContext queries the database
 func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec int, txID string, sql string, parameters ...any) (*sql.Rows, ReleaseResourceFunc, int, error) {
-	entry, ds, err := dm.getTx(txID, true)
+	entry, dsIdx, err := dm.getTx(txID, true)
 	if err != nil {
-		return nil, nil, -1, err
+		return nil, nil, dsIdx, err
 	}
 
-	timeout := ds.DefaultQueryTimeout
+	timeout := dm.dss[dsIdx].DefaultQueryTimeout
 	if timeoutSec > 0 {
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
@@ -418,12 +419,12 @@ func (dm *DsManager) QueryTx(ctx context.Context, timeoutSec int, txID string, s
 		}
 	}
 
-	return rows, releaseResourceFunc, entry.dsIdx, err
+	return rows, releaseResourceFunc, dsIdx, err
 }
 
 // ExecContext executes the database
 func (dm *DsManager) Execute(ctx context.Context, timeoutSec int, datasourceIdx int, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, error) {
-	ds, err := dm.allocateResource(ctx, datasourceIdx, RESOURCE_TYPE_WRITE)
+	ds, err := dm.allocateSemaphore(ctx, datasourceIdx, RESOURCE_TYPE_WRITE)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -438,7 +439,7 @@ func (dm *DsManager) Execute(ctx context.Context, timeoutSec int, datasourceIdx 
 
 	releaseResourceFunc := func() {
 		cancelCtx()
-		ds.releaseResource(RESOURCE_TYPE_WRITE)
+		ds.releaseSemaphore(RESOURCE_TYPE_WRITE)
 	}
 
 	return result, releaseResourceFunc, err
@@ -446,12 +447,12 @@ func (dm *DsManager) Execute(ctx context.Context, timeoutSec int, datasourceIdx 
 
 // ExecContext executes the database
 func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec int, txId string, sql string, parameters ...any) (sql.Result, ReleaseResourceFunc, int, error) {
-	entry, ds, err := dm.getTx(txId, true)
+	entry, dsIdx, err := dm.getTx(txId, true)
 	if err != nil {
 		return nil, nil, -1, err
 	}
 
-	timeout := ds.DefaultQueryTimeout
+	timeout := dm.dss[dsIdx].DefaultQueryTimeout
 	if timeoutSec > 0 {
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
@@ -467,7 +468,7 @@ func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec int, txId string,
 		}
 	}
 
-	return result, releaseResourceFunc, entry.dsIdx, err
+	return result, releaseResourceFunc, dsIdx, err
 }
 
 /************************************************************
@@ -476,7 +477,7 @@ func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec int, txId string,
 func (dm *DsManager) startCleanupTicker() {
 	defer dm.wg.Done()
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(1000 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -505,6 +506,7 @@ func (dm *DsManager) startCleanupTicker() {
 
 				for _, entry := range expiredEntries {
 					ds.cleanupEntry(entry)
+					log.Printf("$$$ cleanup expired transaction: %s", entry.TxID)
 				}
 
 				ds.mu.Unlock()
