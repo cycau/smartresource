@@ -177,7 +177,7 @@ func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 			Datasource:       *ds,
 			MaxTxIdleTimeout: time.Duration(config.MaxTxIdleTimeoutSec) * time.Second,
 
-			semRead:  semaphore.NewWeighted(int64(config.PoolConns - config.MinWriteConns)),
+			semRead:  semaphore.NewWeighted(int64(config.MaxConns - config.MinWriteConns)),
 			semWrite: semaphore.NewWeighted(int64(config.MaxWriteConns)),
 			semTx:    semaphore.NewWeighted(int64(max(1, config.MaxWriteConns*8/10))), // 80%
 			entries:  make(map[string]*TxEntry),

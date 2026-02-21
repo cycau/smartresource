@@ -28,8 +28,8 @@ func runServer(config global.Config) {
 		if dsConfig.MaxWriteConns == 1 {
 			dsConfig.MaxWriteConns = 2
 		}
-		dsConfig.PoolConns = max(3, dsConfig.PoolConns)
-		dsConfig.MaxWriteConns = min(dsConfig.MaxWriteConns, dsConfig.PoolConns-1)
+		dsConfig.MaxConns = max(3, dsConfig.MaxConns)
+		dsConfig.MaxWriteConns = min(dsConfig.MaxWriteConns, dsConfig.MaxConns-1)
 		dsConfig.MinWriteConns = min(dsConfig.MinWriteConns, dsConfig.MaxWriteConns)
 
 		datasourceInfo[i] = *cluster.NewDatasourceInfo(*dsConfig)

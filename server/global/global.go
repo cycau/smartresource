@@ -26,7 +26,7 @@ type DatasourceConfig struct {
 	DatabaseName       string `yaml:"databaseName"`
 	Driver             string `yaml:"driver"`
 	DSN                string `yaml:"dsn"`
-	PoolConns          int    `yaml:"poolConns"`
+	MaxConns           int    `yaml:"maxConns"`
 	MaxConnLifetimeSec int    `yaml:"maxConnLifetimeSec"`
 
 	MaxWriteConns          int `yaml:"maxWriteConns"`

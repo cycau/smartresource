@@ -394,13 +394,13 @@ func (s *switcher) selectRandomNode(dbName string, endpoint endpointType) (nodeI
 			weight := 0.0
 			switch endpoint {
 			case ep_QUERY:
-				weight = float64(ds.PoolConns - ds.MinWriteConns)
+				weight = float64(ds.MaxConns - ds.MinWriteConns)
 			case ep_EXECUTE:
 				weight = float64(ds.MaxWriteConns)
 			case ep_TX_BEGIN:
-				weight = float64(ds.MaxWriteConns+ds.MinWriteConns) / 2.0
+				weight = float64(ds.MaxWriteConns * 8 / 10)
 			default:
-				weight = float64(ds.PoolConns)
+				weight = float64(ds.MaxConns)
 			}
 			if weight <= 0 {
 				continue

@@ -80,7 +80,7 @@ type datasourceInfo struct {
 	DatasourceID  string `json:"datasourceId"`
 	DatabaseName  string `json:"databaseName"`
 	Active        bool   `json:"active"`
-	PoolConns     int    `json:"poolConns"`
+	MaxConns      int    `json:"maxConns"`
 	MaxWriteConns int    `json:"maxWriteConns"`
 	MinWriteConns int    `json:"minWriteConns"`
 }

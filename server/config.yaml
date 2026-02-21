@@ -13,7 +13,7 @@ myDatasources:
     databaseName: crm-system
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
-    poolConns: 20
+    maxConns: 20
     maxWriteConns: 5
     minWriteConns: 2
     maxConnLifetimeSec: 1800
@@ -23,7 +23,7 @@ myDatasources:
     databaseName: crm-system
     driver: postgres
     dsn: "postgres://admin:abcd1234@localhost:5432/lps?sslmode=disable"
-    poolConns: 20
+    maxConns: 20
     maxWriteConns: 5
     minWriteConns: 2
     maxConnLifetimeSec: 1800

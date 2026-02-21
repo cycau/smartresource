@@ -37,7 +37,7 @@ type DatasourceInfo struct {
 	DatasourceID           string `json:"datasourceId"`
 	DatabaseName           string `json:"databaseName"`
 	Active                 bool   `json:"active"`
-	PoolConns              int    `json:"poolConns"`
+	MaxConns               int    `json:"maxConns"`
 	MaxWriteConns          int    `json:"maxWriteConns"`
 	MinWriteConns          int    `json:"minWriteConns"`
 	DefaultQueryTimeoutSec int    `json:"-"`
@@ -61,7 +61,7 @@ func NewDatasourceInfo(config global.DatasourceConfig) *DatasourceInfo {
 		DatasourceID:           config.DatasourceID,
 		DatabaseName:           config.DatabaseName,
 		Active:                 true,
-		PoolConns:              config.PoolConns,
+		MaxConns:               config.MaxConns,
 		MaxWriteConns:          config.MaxWriteConns,
 		MinWriteConns:          config.MinWriteConns,
 		DefaultQueryTimeoutSec: config.DefaultQueryTimeoutSec,
@@ -144,13 +144,13 @@ func (node *NodeInfo) GetScore(tarDbName string, endpoint ENDPOINT_TYPE) []*Scor
 		weight := 0.0
 		switch endpoint {
 		case EP_Query:
-			weight = float64(dsInfo.PoolConns - dsInfo.MinWriteConns)
+			weight = float64(dsInfo.MaxConns - dsInfo.MinWriteConns)
 		case EP_Execute:
 			weight = float64(dsInfo.MaxWriteConns)
 		case EP_BeginTx:
-			weight = float64(dsInfo.MaxWriteConns+dsInfo.MinWriteConns) / 2.0
+			weight = float64(dsInfo.MaxWriteConns * 8 / 10)
 		default:
-			weight = float64(dsInfo.PoolConns)
+			weight = float64(dsInfo.MaxConns)
 		}
 
 		scores = append(scores, &ScoreWithWeight{score: score, weight: weight, exIndex: dsIdx})
@@ -191,9 +191,9 @@ const STAT_COLLECT_INTERVAL = 500 * time.Millisecond
 func calculateMetrics(node *NodeInfo, dsInfo *DatasourceInfo) normalizedMetrics {
 	httpFree := 1 - clamp01(float64(node.RunningHttp)/float64(node.MaxHttpQueue))
 
-	capacityMultiple := float64(node.MaxHttpQueue) / float64(dsInfo.PoolConns)
+	capacityMultiple := float64(node.MaxHttpQueue) / float64(dsInfo.MaxConns)
 
-	readCap := float64(dsInfo.PoolConns-dsInfo.MinWriteConns) * capacityMultiple
+	readCap := float64(dsInfo.MaxConns-dsInfo.MinWriteConns) * capacityMultiple
 	ratio := clamp01(float64(dsInfo.RunningRead) / readCap)
 	readFree := 1 - ratio*ratio
 

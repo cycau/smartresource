@@ -75,8 +75,8 @@ func NewDatasource(config global.DatasourceConfig) (*Datasource, error) {
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(config.PoolConns)
-	db.SetMaxIdleConns(config.PoolConns)
+	db.SetMaxOpenConns(config.MaxConns)
+	db.SetMaxIdleConns(config.MaxConns)
 	if config.MaxConnLifetimeSec > 0 {
 		db.SetConnMaxLifetime(time.Duration(config.MaxConnLifetimeSec) * time.Second)
 	}
