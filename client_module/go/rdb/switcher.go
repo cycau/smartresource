@@ -20,22 +20,22 @@ import (
 type switcher struct {
 	defaultRequestTimeoutSec int
 	candidates               []nodeInfo
-	noneTxConcurrency        *semaphore.Weighted
+	maxConcurrency           *semaphore.Weighted
 	txConcurrency            *semaphore.Weighted
 }
 
 var executor = &switcher{}
 var httpClient *http.Client
 
-func (s *switcher) Init(entries []NodeEntry, maxTotalConcurrency int, maxTxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
+func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
 
 	httpClient = &http.Client{
 		Timeout: time.Duration(defaultRequestTimeoutSec) * time.Second,
 		Transport: &http.Transport{
-			MaxIdleConns:        maxTotalConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
-			MaxIdleConnsPerHost: maxTotalConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
-			MaxConnsPerHost:     maxTotalConcurrency,     // ホストあたりの同時接続上限
-			DisableKeepAlives:   false,                   // Keep-Aliveを有効化
+			MaxIdleConns:        maxConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
+			MaxIdleConnsPerHost: maxConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
+			MaxConnsPerHost:     maxConcurrency,     // ホストあたりの同時接続上限
+			DisableKeepAlives:   false,              // Keep-Aliveを有効化
 
 			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
 				Timeout:   5 * time.Second,
@@ -74,8 +74,8 @@ func (s *switcher) Init(entries []NodeEntry, maxTotalConcurrency int, maxTxConcu
 	s.defaultRequestTimeoutSec = defaultRequestTimeoutSec
 	s.candidates = candidates
 
-	s.noneTxConcurrency = semaphore.NewWeighted(int64(maxTotalConcurrency - maxTxConcurrency))
-	s.txConcurrency = semaphore.NewWeighted(int64(maxTxConcurrency))
+	s.maxConcurrency = semaphore.NewWeighted(int64(maxConcurrency))
+	s.txConcurrency = semaphore.NewWeighted(int64(maxConcurrency * 8 / 10)) // 80% of maxConcurrency
 
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
@@ -87,11 +87,15 @@ func (s *switcher) Request(startTx bool, dbName string, endpoint endpointType, m
 			return nil, err
 		}
 		defer s.txConcurrency.Release(1)
-	} else {
-		if err := s.noneTxConcurrency.Acquire(context.Background(), 1); err != nil {
+		if err := s.maxConcurrency.Acquire(context.Background(), 1); err != nil {
 			return nil, err
 		}
-		defer s.noneTxConcurrency.Release(1)
+		defer s.maxConcurrency.Release(1)
+	} else {
+		if err := s.maxConcurrency.Acquire(context.Background(), 1); err != nil {
+			return nil, err
+		}
+		defer s.maxConcurrency.Release(1)
 	}
 
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)

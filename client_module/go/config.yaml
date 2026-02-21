@@ -1,5 +1,4 @@
-maxTotalConcurrency: 100
-maxTxConcurrency: 20
+maxConcurrency: 100
 defaultSecretKey: "secret-key"
 defaultDatabase: "crm-system"
 defaultRequestTimeoutSec: 30

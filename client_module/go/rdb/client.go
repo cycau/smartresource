@@ -57,8 +57,7 @@ const hEADER_TIMEOUT_SEC = "_cy_TimeoutSec"
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
-	MaxTotalConcurrency      int         `yaml:"maxTotalConcurrency"`
-	MaxTxConcurrency         int         `yaml:"maxTxConcurrency"`
+	MaxConcurrency           int         `yaml:"maxConcurrency"`
 	DefaultSecretKey         string      `yaml:"defaultSecretKey"`
 	DefaultDatabase          string      `yaml:"defaultDatabase"`
 	DefaultRequestTimeoutSec int         `yaml:"defaultRequestTimeoutSec"`
@@ -88,22 +87,20 @@ type datasourceInfo struct {
 
 var dEFAULT_DATABASE = ""
 
-func Init(nodes []NodeEntry, maxTotalConcurrency int, maxTxConcurrency int, defaultQueryTimeoutSec int) error {
+func Init(nodes []NodeEntry, maxConcurrency int, defaultQueryTimeoutSec int) error {
 	if len(nodes) < 1 {
 		return fmt.Errorf("No cluster nodes configured.")
 	}
 
-	maxTotalConcurrency = max(2, maxTotalConcurrency)
-	maxTxConcurrency = max(1, maxTxConcurrency)
+	maxConcurrency = max(10, maxConcurrency)
 	if defaultQueryTimeoutSec < 1 {
 		defaultQueryTimeoutSec = 30
 	}
 
-	log.Println("### [Init] maxTotalConcurrency:", maxTotalConcurrency)
-	log.Println("### [Init] maxTxConcurrency:", maxTxConcurrency)
+	log.Println("### [Init] maxConcurrency:", maxConcurrency)
 	log.Println("### [Init] entries:", nodes)
 
-	defaultDatabase, err := executor.Init(nodes, maxTotalConcurrency, maxTxConcurrency, defaultQueryTimeoutSec)
+	defaultDatabase, err := executor.Init(nodes, maxConcurrency, defaultQueryTimeoutSec)
 	if dEFAULT_DATABASE == "" {
 		dEFAULT_DATABASE = defaultDatabase
 	}
@@ -130,7 +127,7 @@ func InitWithConfig(configPath string) error {
 	}
 
 	dEFAULT_DATABASE = config.DefaultDatabase
-	return Init(config.ClusterNodes, config.MaxTotalConcurrency, config.MaxTxConcurrency, config.DefaultRequestTimeoutSec)
+	return Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
 }
 
 /**************************************************

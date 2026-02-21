@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	smartclient "smartresource/clientmodule/go/rdb"
 	"smartresource/clientmodule/go/test"
@@ -56,7 +55,8 @@ func main() {
 
 				var err error
 				var result *smartclient.Records
-				switch rand.Intn(4) {
+				funcIdx := 0 // rand.Intn(4)
+				switch funcIdx {
 				case 0:
 					result, err = test.TestTxCase1()
 				case 1:
