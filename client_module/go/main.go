@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	smartclient "smartresource/clientmodule/go/rdb"
 	"smartresource/clientmodule/go/test"
@@ -26,16 +27,20 @@ func main() {
 	}
 
 	count := 1
+	batchSize := 1000
 	if len(os.Args) > 1 {
-		cnt, _ := strconv.ParseInt(os.Args[1], 10, 64)
-		count = int(cnt)
+		num, _ := strconv.ParseInt(os.Args[1], 10, 64)
+		count = int(num)
 	}
-	log.Printf("Starting test with %d concurrent clients\n", count)
+	if len(os.Args) > 2 {
+		num, _ := strconv.ParseInt(os.Args[2], 10, 64)
+		batchSize = int(num)
+	}
+	log.Printf("*** Starting Test %d times with Concurrents %d\n", count, batchSize)
 
 	var countOK, countError atomic.Int64
 	start := time.Now()
 	wg := sync.WaitGroup{}
-	batchSize := 10000
 	loopCount := count / batchSize
 	if count%batchSize != 0 {
 		loopCount++
@@ -48,7 +53,21 @@ func main() {
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()
-				result, err := test.TestRandomTx()
+
+				var err error
+				var result *smartclient.Records
+				switch rand.Intn(4) {
+				case 0:
+					result, err = test.TestTxCase1()
+				case 1:
+					result, err = test.TestTxCase2()
+				case 2:
+					result, err = test.TestRandomSelect()
+				case 3:
+					_, err = test.TestRandomUpdate()
+				case 4:
+					result, err = test.TestRandomTx()
+				}
 				if err != nil {
 					log.Printf("Test error: %v", err)
 					countError.Add(1)

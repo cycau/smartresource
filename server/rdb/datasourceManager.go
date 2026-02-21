@@ -66,6 +66,7 @@ type TxDatasource struct {
 	mu       sync.Mutex
 	semRead  *semaphore.Weighted
 	semWrite *semaphore.Weighted
+	semTx    *semaphore.Weighted
 	entries  map[string]*TxEntry
 
 	runningRead  int
@@ -96,6 +97,7 @@ func (ds *TxDatasource) releaseSemaphore(resourceType ResourceType) {
 	case RESOURCE_TYPE_WRITE:
 		ds.semWrite.Release(1)
 	case RESOURCE_TYPE_TX:
+		ds.semTx.Release(1)
 		ds.semWrite.Release(1)
 	}
 
@@ -115,6 +117,7 @@ func (ds *TxDatasource) cleanupEntry(entry *TxEntry) {
 
 	delete(ds.entries, entry.TxID)
 	ds.runningTx--
+	ds.semTx.Release(1)
 	ds.semWrite.Release(1)
 
 	go func() {
@@ -125,9 +128,9 @@ func (ds *TxDatasource) cleanupEntry(entry *TxEntry) {
 
 func (ds *TxDatasource) getEntry(txID string, executing bool) (*TxEntry, error) {
 	ds.mu.Lock()
-	entry, ok := ds.entries[txID]
-	ds.mu.Unlock()
+	defer ds.mu.Unlock()
 
+	entry, ok := ds.entries[txID]
 	if !ok {
 		return nil, ErrTxNotFound
 	}
@@ -135,9 +138,7 @@ func (ds *TxDatasource) getEntry(txID string, executing bool) (*TxEntry, error) 
 	// Check if expired
 	if time.Now().After(entry.ExpiresAt) {
 		// Remove expired entry
-		ds.mu.Unlock()
 		ds.cleanupEntry(entry)
-		ds.mu.Lock()
 
 		return nil, ErrTxExpired
 	}
@@ -178,6 +179,7 @@ func NewDsManager(configs []global.DatasourceConfig) *DsManager {
 
 			semRead:  semaphore.NewWeighted(int64(config.PoolConns - config.MinWriteConns)),
 			semWrite: semaphore.NewWeighted(int64(config.MaxWriteConns)),
+			semTx:    semaphore.NewWeighted(int64(max(1, config.MaxWriteConns*8/10))), // 80%
 			entries:  make(map[string]*TxEntry),
 
 			runningRead:  0,
@@ -234,8 +236,16 @@ func (dm *DsManager) allocateSemaphore(ctx context.Context, datasourceIdx int, r
 			return nil, fmt.Errorf("failed to acquire write semaphore: %w", err)
 		}
 	case RESOURCE_TYPE_TX:
-		err := ds.semWrite.Acquire(ctx, 1)
+		err := ds.semTx.Acquire(ctx, 1)
 		if err != nil {
+			ds.mu.Lock()
+			ds.runningTx--
+			ds.mu.Unlock()
+			return nil, fmt.Errorf("failed to acquire transaction semaphore: %w", err)
+		}
+		err = ds.semWrite.Acquire(ctx, 1)
+		if err != nil {
+			ds.semTx.Release(1)
 			ds.mu.Lock()
 			ds.runningTx--
 			ds.mu.Unlock()
@@ -477,7 +487,7 @@ func (dm *DsManager) ExecuteTx(ctx context.Context, timeoutSec int, txId string,
 func (dm *DsManager) startCleanupTicker() {
 	defer dm.wg.Done()
 
-	ticker := time.NewTicker(1000 * time.Millisecond)
+	ticker := time.NewTicker(567 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

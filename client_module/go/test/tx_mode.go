@@ -16,13 +16,11 @@ func TestTxCase1() (*smartclient.Records, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewTx error: %w", err)
 	}
-	//defer txClient.Close()
+	defer txClient.Close()
 
-	id := rand.Intn(1000000)
-	idStr := "0000000" + strconv.Itoa(id)
-	idStr = idStr[len(idStr)-7:]
-	userId := "d5794b1b-5f92-4dc6-aa48-085d_" + idStr
-	email := "john@example.com_alter_" + idStr
+	idStr := "0000000" + strconv.Itoa(rand.Intn(1000000))
+	userId := "d5794b1b-5f92-4dc6-aa48-085d_" + idStr[len(idStr)-7:]
+	email := "john@example.com_alter_" + strconv.Itoa(rand.Intn(1000000))
 
 	params := smartclient.NewParams().
 		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)
@@ -50,19 +48,23 @@ func TestTxCase1() (*smartclient.Records, error) {
 	)
 
 	if records.Get(0).Get("email") != email {
-		return nil, fmt.Errorf("email mismatch: %w", err)
+		return nil, fmt.Errorf("email should BE the same: %s != %s", records.Get(0).Get("email"), email)
+	}
+	if records2.Get(0).Get("email") == email {
+		return nil, fmt.Errorf("email should NOT BE the same: %s == %s", records2.Get(0).Get("email"), email)
 	}
 
 	err = txClient.Commit()
-	records3, _ := dbClient.Query(
+
+	records3, err := dbClient.Query(
 		"SELECT * FROM users where id = $1",
 		params,
 		nil,
 	)
 
-	log.Println(records.Get(0).Get("email"), records2.Get(0).Get("email"), records3.Get(0).Get("email"))
+	//log.Println(records.Get(0).Get("email"), records2.Get(0).Get("email"), records3.Get(0).Get("email"))
 
-	return records, nil
+	return records3, nil
 }
 
 func TestTxCase2() (*smartclient.Records, error) {
@@ -71,7 +73,7 @@ func TestTxCase2() (*smartclient.Records, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewTx error: %w", err)
 	}
-	//defer txClient.Close()
+	defer txClient.Close()
 
 	id := rand.Intn(1000000)
 	idStr := "0000000" + strconv.Itoa(id)
@@ -115,7 +117,9 @@ func TestTxCase2() (*smartclient.Records, error) {
 		nil,
 	)
 
-	log.Println(records.Get(0).Get("email"), records2.Get(0).Get("email"), records3.Get(0).Get("email"))
+	if id == 0 {
+		log.Println(records.Get(0).Get("email"), records2.Get(0).Get("email"), records3.Get(0).Get("email"))
+	}
 
 	return records, nil
 }
@@ -132,7 +136,7 @@ func TestTxCase3() (*smartclient.Records, error) {
 	idStr := "0000000" + strconv.Itoa(id)
 	idStr = idStr[len(idStr)-7:]
 	userId := "d5794b1b-5f92-4dc6-aa48-085d_" + idStr
-	email := "john@example.com_alter_" + idStr
+	email := "john@example.com_TxTimeout_" + idStr
 
 	params := smartclient.NewParams().
 		// Add("01916e5a-2345-7002-b000-000000000002", smartclient.ValueType_STRING)

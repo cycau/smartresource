@@ -20,22 +20,22 @@ import (
 type switcher struct {
 	defaultRequestTimeoutSec int
 	candidates               []nodeInfo
-	semNoneTx                *semaphore.Weighted
-	semTx                    *semaphore.Weighted
+	noneTxConcurrency        *semaphore.Weighted
+	txConcurrency            *semaphore.Weighted
 }
 
 var executor = &switcher{}
 var httpClient *http.Client
 
-func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
+func (s *switcher) Init(entries []NodeEntry, maxTotalConcurrency int, maxTxConcurrency int, defaultRequestTimeoutSec int) (defaultDatabase string, err error) {
 
 	httpClient = &http.Client{
 		Timeout: time.Duration(defaultRequestTimeoutSec) * time.Second,
 		Transport: &http.Transport{
-			MaxIdleConns:        maxConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
-			MaxIdleConnsPerHost: maxConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
-			MaxConnsPerHost:     maxConcurrency,     // ホストあたりの同時接続上限
-			DisableKeepAlives:   false,              // Keep-Aliveを有効化
+			MaxIdleConns:        maxTotalConcurrency * 2, // 最大アイドル接続数（全ホスト合計）
+			MaxIdleConnsPerHost: maxTotalConcurrency,     // ホストあたりのアイドル接続数（未設定時は2のため接続が閉じられTIME_WAITが増える）
+			MaxConnsPerHost:     maxTotalConcurrency,     // ホストあたりの同時接続上限
+			DisableKeepAlives:   false,                   // Keep-Aliveを有効化
 
 			DialContext: (&net.Dialer{ // 接続を確立する際のタイムアウト
 				Timeout:   5 * time.Second,
@@ -47,7 +47,6 @@ func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestT
 
 	candidates := make([]nodeInfo, len(entries))
 
-	errNode := ""
 	var wg sync.WaitGroup
 	for i, entry := range entries {
 		n := &candidates[i]
@@ -60,8 +59,7 @@ func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestT
 
 			nodeInfo, err := fetchNodeInfo(node.BaseURL, node.SecretKey)
 			if err != nil {
-				log.Printf("fetch node info %s: %v", node.BaseURL, err)
-				errNode = node.BaseURL
+				log.Printf("### [Warning] Fetch node info %s: %v", node.BaseURL, err)
 				return
 			}
 			node.NodeID = nodeInfo.NodeID
@@ -73,28 +71,28 @@ func (s *switcher) Init(entries []NodeEntry, maxConcurrency int, defaultRequestT
 	}
 	wg.Wait()
 
-	if errNode != "" {
-		return "", fmt.Errorf("failed to connect to node. %s", errNode)
-	}
-
 	s.defaultRequestTimeoutSec = defaultRequestTimeoutSec
 	s.candidates = candidates
-	txMaxConcurrency := maxConcurrency / 10
-	if txMaxConcurrency < 1 {
-		txMaxConcurrency = 1
-	}
-	s.semNoneTx = semaphore.NewWeighted(int64(maxConcurrency - txMaxConcurrency))
-	s.semTx = semaphore.NewWeighted(int64(txMaxConcurrency))
+
+	s.noneTxConcurrency = semaphore.NewWeighted(int64(maxTotalConcurrency - maxTxConcurrency))
+	s.txConcurrency = semaphore.NewWeighted(int64(maxTxConcurrency))
 
 	return candidates[0].Datasources[0].DatabaseName, nil
 }
 
 // RequestTimeout は 0 のときクライアント共通タイムアウトのみ。>0 のときこのリクエスト専用のタイムアウトを指定（先に切れた方が有効）。
-func (s *switcher) Request(dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, retryCount int) (*smartResponse, error) {
-	if err := s.semNoneTx.Acquire(context.Background(), 1); err != nil {
-		return nil, err
+func (s *switcher) Request(startTx bool, dbName string, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, retryCount int) (*smartResponse, error) {
+	if startTx {
+		if err := s.txConcurrency.Acquire(context.Background(), 1); err != nil {
+			return nil, err
+		}
+		defer s.txConcurrency.Release(1)
+	} else {
+		if err := s.noneTxConcurrency.Acquire(context.Background(), 1); err != nil {
+			return nil, err
+		}
+		defer s.noneTxConcurrency.Release(1)
 	}
-	defer s.semNoneTx.Release(1)
 
 	nodeIdx, dsIdx, err := s.selectNode(dbName, endpoint)
 	if err != nil {
@@ -138,14 +136,9 @@ func (s *switcher) Request(dbName string, endpoint endpointType, method string, 
 	time.Sleep(300 * time.Millisecond)
 
 	// retry
-	return s.Request(dbName, endpoint, method, headers, body, timoutSec, retryCount)
+	return s.Request(startTx, dbName, endpoint, method, headers, body, timoutSec, retryCount)
 }
-
 func (s *switcher) RequestTx(nodeIdx int, endpoint endpointType, method string, headers map[string]string, body map[string]any, timoutSec int, retryCount int) (*smartResponse, error) {
-	if err := s.semTx.Acquire(context.Background(), 1); err != nil {
-		return nil, err
-	}
-	defer s.semTx.Release(1)
 
 	node := &s.candidates[nodeIdx]
 	resp, err := s.requestHttp(nodeIdx, node.BaseURL, node.SecretKey, endpoint, method, headers, body, timoutSec, 0)

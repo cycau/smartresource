@@ -1,4 +1,5 @@
-maxConcurrency: 100
+maxTotalConcurrency: 100
+maxTxConcurrency: 20
 defaultSecretKey: "secret-key"
 defaultDatabase: "crm-system"
 defaultRequestTimeoutSec: 30
@@ -6,4 +7,4 @@ defaultRequestTimeoutSec: 30
 clusterNodes:
   - baseUrl: "http://localhost:5678"
     secretKey: "secret-key"
-  - baseUrl: "http://localhost:5679"
+  - baseUrl: "http://localhost:5678"

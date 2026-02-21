@@ -57,7 +57,8 @@ const hEADER_TIMEOUT_SEC = "_cy_TimeoutSec"
 
 // clientConfig は config.yaml の構造
 type clientConfig struct {
-	MaxConcurrency           int         `yaml:"maxConcurrency"`
+	MaxTotalConcurrency      int         `yaml:"maxTotalConcurrency"`
+	MaxTxConcurrency         int         `yaml:"maxTxConcurrency"`
 	DefaultSecretKey         string      `yaml:"defaultSecretKey"`
 	DefaultDatabase          string      `yaml:"defaultDatabase"`
 	DefaultRequestTimeoutSec int         `yaml:"defaultRequestTimeoutSec"`
@@ -87,21 +88,22 @@ type datasourceInfo struct {
 
 var dEFAULT_DATABASE = ""
 
-func Init(nodes []NodeEntry, maxConcurrency int, defaultQueryTimeoutSec int) error {
+func Init(nodes []NodeEntry, maxTotalConcurrency int, maxTxConcurrency int, defaultQueryTimeoutSec int) error {
 	if len(nodes) < 1 {
 		return fmt.Errorf("No cluster nodes configured.")
 	}
-	if maxConcurrency < 1 {
-		maxConcurrency = 50
-	}
+
+	maxTotalConcurrency = max(2, maxTotalConcurrency)
+	maxTxConcurrency = max(1, maxTxConcurrency)
 	if defaultQueryTimeoutSec < 1 {
 		defaultQueryTimeoutSec = 30
 	}
 
-	log.Println("### [Init] maxConcurrency:", maxConcurrency)
+	log.Println("### [Init] maxTotalConcurrency:", maxTotalConcurrency)
+	log.Println("### [Init] maxTxConcurrency:", maxTxConcurrency)
 	log.Println("### [Init] entries:", nodes)
 
-	defaultDatabase, err := executor.Init(nodes, maxConcurrency, defaultQueryTimeoutSec)
+	defaultDatabase, err := executor.Init(nodes, maxTotalConcurrency, maxTxConcurrency, defaultQueryTimeoutSec)
 	if dEFAULT_DATABASE == "" {
 		dEFAULT_DATABASE = defaultDatabase
 	}
@@ -128,7 +130,7 @@ func InitWithConfig(configPath string) error {
 	}
 
 	dEFAULT_DATABASE = config.DefaultDatabase
-	return Init(config.ClusterNodes, config.MaxConcurrency, config.DefaultRequestTimeoutSec)
+	return Init(config.ClusterNodes, config.MaxTotalConcurrency, config.MaxTxConcurrency, config.DefaultRequestTimeoutSec)
 }
 
 /**************************************************
@@ -198,7 +200,7 @@ func (c *Client) Query(sql string, params *Params, opts *QueryOptions) (*Records
 		timeoutSec = opts.TimeoutSec
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_QUERY, http.MethodPost, headers, body, timeoutSec, 2)
+	resp, err := c.executor.Request(false, c.dbName, ep_QUERY, http.MethodPost, headers, body, timeoutSec, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +227,7 @@ func (c *Client) Execute(sql string, params *Params) (*ExecuteResult, error) {
 		"params": paramValues,
 	}
 
-	resp, err := c.executor.Request(c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 0, 2)
+	resp, err := c.executor.Request(false, c.dbName, ep_EXECUTE, http.MethodPost, headers, body, 0, 2)
 	if err != nil {
 		return nil, err
 	}

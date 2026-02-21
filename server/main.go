@@ -24,12 +24,13 @@ func runServer(config global.Config) {
 	datasourceInfo := make([]cluster.DatasourceInfo, len(config.MyDatasources))
 	for i := range config.MyDatasources {
 		dsConfig := &config.MyDatasources[i]
-		if dsConfig.MaxWriteConns > dsConfig.PoolConns {
-			dsConfig.MaxWriteConns = dsConfig.PoolConns
+
+		if dsConfig.MaxWriteConns == 1 {
+			dsConfig.MaxWriteConns = 2
 		}
-		if dsConfig.MinWriteConns > dsConfig.MaxWriteConns {
-			dsConfig.MinWriteConns = dsConfig.MaxWriteConns
-		}
+		dsConfig.PoolConns = max(3, dsConfig.PoolConns)
+		dsConfig.MaxWriteConns = min(dsConfig.MaxWriteConns, dsConfig.PoolConns-1)
+		dsConfig.MinWriteConns = min(dsConfig.MinWriteConns, dsConfig.MaxWriteConns)
 
 		datasourceInfo[i] = *cluster.NewDatasourceInfo(*dsConfig)
 	}
@@ -42,7 +43,6 @@ func runServer(config global.Config) {
 	if maxHttpQueue <= 0 {
 		maxHttpQueue = 1000 // default
 	}
-	log.Printf("HTTP connection limit: %d", maxHttpQueue)
 
 	nodeId, _ := gonanoid.New(9)
 	thisNode := &cluster.NodeInfo{
@@ -53,6 +53,11 @@ func runServer(config global.Config) {
 		MaxHttpQueue: maxHttpQueue,
 		Datasources:  datasourceInfo,
 	}
+
+	log.Printf("### [Server] Node ID: %s", thisNode.NodeID)
+	log.Printf("### [Server] Node Name: %s", config.NodeName)
+	log.Printf("### [Server] Datasources: %v", datasourceInfo)
+	log.Printf("### [Server] Max Client HTTP Queue: %d", maxHttpQueue)
 
 	// collect cluster health information
 	clusterNodes := make([]*cluster.NodeInfo, 0, len(config.ClusterNodes))
@@ -79,9 +84,9 @@ func runServer(config global.Config) {
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Server starting on port %d", config.NodePort)
+		log.Printf("### [Server] Starting on port: %d", config.NodePort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed to start: %v", err)
+			log.Fatalf("### [Error] Server failed to start: %v", err)
 		}
 	}()
 
@@ -92,7 +97,7 @@ func runServer(config global.Config) {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	log.Println("### [Server] Shutting down server...")
 	thisNode.Mu.Lock()
 	thisNode.Status = cluster.STOPPING
 	thisNode.Mu.Unlock()
@@ -101,13 +106,13 @@ func runServer(config global.Config) {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+		log.Printf("### [Error] Server forced to shutdown: %v", err)
 	}
 
 	// Shutdown DsManager
 	dsManager.Shutdown()
 
-	log.Println("Server exited")
+	log.Println("### [Server] Exited successfully.")
 }
 
 func main() {
@@ -119,13 +124,18 @@ func main() {
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		log.Fatalf("Failed to read config file: %v", err)
+		log.Fatalf("### [Error] Failed to read config file: %v", err)
 		return
 	}
 
 	var config global.Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		log.Fatalf("Failed to parse config file: %v", err)
+		log.Fatalf("### [Error] Failed to parse config file: %v", err)
+		return
+	}
+
+	if len(config.MyDatasources) < 1 {
+		log.Printf("### [Error] Wrong configuration file: %s", configPath)
 		return
 	}
 

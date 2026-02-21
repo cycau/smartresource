@@ -1,11 +1,11 @@
 nodeName: "dbapi-1"
-nodePort: 5679
+nodePort: 5678
 maxHttpQueue: 10000
 secretKey: "secret-key"
 
 clusterNodes:
   - "http://localhost:5678"
-  - "http://localhost:5679"
+  - "http://localhost:5678"
 
 
 myDatasources:
